@@ -1,0 +1,25 @@
+(library
+ (name mytoyc)
+ (modules
+  ast
+  diagnostic
+  token
+  parser
+  lexer
+  symbol
+  sema
+  ir
+  irgen
+  cfg
+  optimize
+  liveness
+  regalloc
+  riscv
+  codegen
+  driver)
+ (libraries))
+
+(ocamllex lexer)
+
+(menhir
+ (modules parser))
