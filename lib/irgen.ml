@@ -1,47 +1,93 @@
-let truthy value = if value = 0 then 0 else 1
+type env = {
+  vars : Ir.vreg Symbol.StringMap.t;
+  next_reg : int;
+}
 
-let rec eval_expr = function
-  | Ast.Int value -> value
+let empty_env = { vars = Symbol.StringMap.empty; next_reg = 0 }
+
+let fresh env =
+  (env.next_reg, { env with next_reg = env.next_reg + 1 })
+
+let find_var env name =
+  match Symbol.StringMap.find_opt name env.vars with
+  | Some reg -> reg
+  | None -> Diagnostic.fail (Printf.sprintf "undefined variable: %s" name)
+
+let add_var env name reg =
+  { env with vars = Symbol.StringMap.add name reg env.vars }
+
+let rec lower_expr env = function
+  | Ast.Int value -> (env, [], Ir.Imm value)
+  | Ast.Var name -> (env, [], Ir.Reg (find_var env name))
   | Ast.Unary (op, expr) ->
-      let value = eval_expr expr in
-      (match op with
-      | Ast.Pos -> value
-      | Ast.Neg -> -value
-      | Ast.LNot -> if value = 0 then 1 else 0)
+      let env, code, operand = lower_expr env expr in
+      let dest, env = fresh env in
+      (env, code @ [ Ir.Unary (dest, op, operand) ], Ir.Reg dest)
   | Ast.Binary (op, lhs, rhs) ->
-      let left = eval_expr lhs in
-      let right = eval_expr rhs in
-      (match op with
-      | Ast.Add -> left + right
-      | Ast.Sub -> left - right
-      | Ast.Mul -> left * right
-      | Ast.Div ->
-          if right = 0 then Diagnostic.fail "division by zero";
-          left / right
-      | Ast.Mod ->
-          if right = 0 then Diagnostic.fail "modulo by zero";
-          left mod right
-      | Ast.Lt -> if left < right then 1 else 0
-      | Ast.Gt -> if left > right then 1 else 0
-      | Ast.Le -> if left <= right then 1 else 0
-      | Ast.Ge -> if left >= right then 1 else 0
-      | Ast.Eq -> if left = right then 1 else 0
-      | Ast.Ne -> if left <> right then 1 else 0
-      | Ast.LAnd -> if truthy left <> 0 && truthy right <> 0 then 1 else 0
-      | Ast.LOr -> if truthy left <> 0 || truthy right <> 0 then 1 else 0)
-  | Ast.Var name ->
-      Diagnostic.fail
-        (Printf.sprintf "unsupported variable expression in this stage: %s" name)
+      let env, left_code, left = lower_expr env lhs in
+      let env, right_code, right = lower_expr env rhs in
+      let dest, env = fresh env in
+      (env, left_code @ right_code @ [ Ir.Binary (dest, op, left, right) ], Ir.Reg dest)
   | Ast.Call (name, _) ->
       Diagnostic.fail
-        (Printf.sprintf "unsupported function call in this stage: %s" name)
+        (Printf.sprintf "backend does not support function call yet: %s" name)
 
-let lower_stmt = function
-  | Ast.Return None -> Ir.Return (Ir.Imm 0)
-  | Ast.Return (Some expr) -> Ir.Return (Ir.Imm (eval_expr expr))
+let lower_decl env = function
+  | Ast.ConstDecl (name, expr) | Ast.VarDecl (name, Some expr) ->
+      let dest, env = fresh env in
+      let env = add_var env name dest in
+      let env, code, value = lower_expr env expr in
+      (env, code @ [ Ir.Move (dest, value) ])
+  | Ast.VarDecl (name, None) ->
+      let dest, env = fresh env in
+      let env = add_var env name dest in
+      (env, [ Ir.Move (dest, Ir.Imm 0) ])
+
+let rec lower_stmt env = function
+  | Ast.Block body ->
+      List.fold_left
+        (fun (env, code) stmt ->
+          let env, stmt_code = lower_stmt env stmt in
+          (env, code @ stmt_code))
+        (env, []) body
+  | Ast.Empty -> (env, [])
+  | Ast.DeclStmt decl -> lower_decl env decl
+  | Ast.Assign (name, expr) ->
+      let dest = find_var env name in
+      let env, code, value = lower_expr env expr in
+      (env, code @ [ Ir.Move (dest, value) ])
+  | Ast.ExprStmt expr ->
+      let env, code, _ = lower_expr env expr in
+      (env, code)
+  | Ast.Return None -> (env, [ Ir.Return (Ir.Imm 0) ])
+  | Ast.Return (Some expr) ->
+      let env, code, value = lower_expr env expr in
+      (env, code @ [ Ir.Return value ])
+  | Ast.If _ -> Diagnostic.fail "backend does not support if statement yet"
+  | Ast.While _ -> Diagnostic.fail "backend does not support while statement yet"
+  | Ast.Break -> Diagnostic.fail "backend does not support break statement yet"
+  | Ast.Continue -> Diagnostic.fail "backend does not support continue statement yet"
 
 let lower_func func =
-  { Ir.name = func.Ast.name; body = List.map lower_stmt func.body }
+  let env, param_moves =
+    List.fold_left
+      (fun (env, code) param ->
+        let dest, env = fresh env in
+        let env = add_var env param.Ast.param_name dest in
+        (env, code @ [ Ir.Move (dest, Ir.Imm 0) ]))
+      (empty_env, []) func.Ast.params
+  in
+  let _, body =
+    List.fold_left
+      (fun (env, code) stmt ->
+        let env, stmt_code = lower_stmt env stmt in
+        (env, code @ stmt_code))
+      (env, param_moves) func.Ast.body
+  in
+  { Ir.name = func.Ast.name; body }
 
 let lower_program (program : Ast.program) : Ir.program =
-  List.map lower_func program
+  program
+  |> List.filter_map (function
+       | Ast.GlobalDecl _ -> None
+       | Ast.FuncDef func -> Some (lower_func func))

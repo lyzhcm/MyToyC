@@ -29,13 +29,36 @@ type expr =
   | Unary of unop * expr
   | Call of string * expr list
 
+type decl =
+  | ConstDecl of string * expr
+  | VarDecl of string * expr option
+
 type stmt =
+  | Block of stmt list
+  | Empty
+  | DeclStmt of decl
+  | Assign of string * expr
+  | ExprStmt of expr
+  | If of expr * stmt * stmt option
+  | While of expr * stmt
+  | Break
+  | Continue
   | Return of expr option
+
+type param = {
+  param_type : typ;
+  param_name : string;
+}
 
 type func = {
   return_type : typ;
   name : string;
+  params : param list;
   body : stmt list;
 }
 
-type program = func list
+type program_item =
+  | GlobalDecl of decl
+  | FuncDef of func
+
+type program = program_item list
