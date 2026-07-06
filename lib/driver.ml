@@ -2,6 +2,17 @@ let parse source =
   let lexbuf = Lexing.from_string source in
   Parser.program Lexer.token lexbuf
 
+let lex_all source =
+  let lexbuf = Lexing.from_string source in
+  let rec loop acc =
+    let token = Lexer.token lexbuf in
+    let acc = token :: acc in
+    match token with
+    | Parser.EOF -> List.rev acc
+    | _ -> loop acc
+  in
+  loop []
+
 let compile ?(optimize = false) source =
   source
   |> parse

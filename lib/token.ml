@@ -1,34 +1,36 @@
-type t =
-  | Const
-  | Int
-  | Void
-  | If
-  | Else
-  | While
-  | Break
-  | Continue
-  | Return
-  | Ident of string
-  | Number of int
-  | LParen
-  | RParen
-  | LBrace
-  | RBrace
-  | Semicolon
-  | Comma
-  | Assign
-  | Plus
-  | Minus
-  | Star
-  | Slash
-  | Percent
-  | Bang
-  | Lt
-  | Gt
-  | Le
-  | Ge
-  | Eq
-  | Ne
-  | AndAnd
-  | OrOr
-  | Eof
+type t = Parser.token
+
+let to_string = function
+  | Parser.CONST -> "CONST"
+  | Parser.INT -> "INT"
+  | Parser.VOID -> "VOID"
+  | Parser.IF -> "IF"
+  | Parser.ELSE -> "ELSE"
+  | Parser.WHILE -> "WHILE"
+  | Parser.BREAK -> "BREAK"
+  | Parser.CONTINUE -> "CONTINUE"
+  | Parser.RETURN -> "RETURN"
+  | Parser.IDENT name -> Printf.sprintf "IDENT(%S)" name
+  | Parser.NUMBER n -> Printf.sprintf "NUMBER(%d)" n
+  | Parser.LPAREN -> "LPAREN"
+  | Parser.RPAREN -> "RPAREN"
+  | Parser.LBRACE -> "LBRACE"
+  | Parser.RBRACE -> "RBRACE"
+  | Parser.SEMICOLON -> "SEMICOLON"
+  | Parser.COMMA -> "COMMA"
+  | Parser.ASSIGN -> "ASSIGN"
+  | Parser.PLUS -> "PLUS"
+  | Parser.MINUS -> "MINUS"
+  | Parser.STAR -> "STAR"
+  | Parser.SLASH -> "SLASH"
+  | Parser.PERCENT -> "PERCENT"
+  | Parser.BANG -> "BANG"
+  | Parser.LT -> "LT"
+  | Parser.GT -> "GT"
+  | Parser.LE -> "LE"
+  | Parser.GE -> "GE"
+  | Parser.EQ -> "EQ"
+  | Parser.NE -> "NE"
+  | Parser.AND_AND -> "AND_AND"
+  | Parser.OR_OR -> "OR_OR"
+  | Parser.EOF -> "EOF"
