@@ -154,9 +154,9 @@ and lower_call_expr env name args =
 
 let lower_decl env = function
   | Ast.ConstDecl (name, expr) | Ast.VarDecl (name, Some expr) ->
+      let env, code, value = lower_expr env expr in
       let dest, env = fresh env in
       let env = add_var env name dest in
-      let env, code, value = lower_expr env expr in
       (env, code @ [ Ir.Move (dest, value) ])
   | Ast.VarDecl (name, None) ->
       let dest, env = fresh env in

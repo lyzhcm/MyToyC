@@ -71,8 +71,13 @@ lor_expr:
   | lhs = lor_expr; OR_OR; rhs = land_expr { Binary (LOr, lhs, rhs) }
 
 land_expr:
+  | e = eq_expr { e }
+  | lhs = land_expr; AND_AND; rhs = eq_expr { Binary (LAnd, lhs, rhs) }
+
+eq_expr:
   | e = rel_expr { e }
-  | lhs = land_expr; AND_AND; rhs = rel_expr { Binary (LAnd, lhs, rhs) }
+  | lhs = eq_expr; EQ; rhs = rel_expr { Binary (Eq, lhs, rhs) }
+  | lhs = eq_expr; NE; rhs = rel_expr { Binary (Ne, lhs, rhs) }
 
 rel_expr:
   | e = add_expr { e }
@@ -80,8 +85,6 @@ rel_expr:
   | lhs = rel_expr; GT; rhs = add_expr { Binary (Gt, lhs, rhs) }
   | lhs = rel_expr; LE; rhs = add_expr { Binary (Le, lhs, rhs) }
   | lhs = rel_expr; GE; rhs = add_expr { Binary (Ge, lhs, rhs) }
-  | lhs = rel_expr; EQ; rhs = add_expr { Binary (Eq, lhs, rhs) }
-  | lhs = rel_expr; NE; rhs = add_expr { Binary (Ne, lhs, rhs) }
 
 add_expr:
   | e = mul_expr { e }

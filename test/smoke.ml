@@ -306,4 +306,10 @@ int main() {
     13;
   expect_run_result
     "int id(int x){ return x; } int main(){ return !(1 + 2 * 3 - 7) + ((id(5) > 3 && 0) || (4 / 2 == 2)); }"
-    2
+    2;
+  expect_run_result
+    "int main(){ int x = 4; { int x = x + 3; return x; } return 0; }"
+    7;
+  expect_run_result
+    "int main(){ return 1 != 2 < 3; }"
+    0
