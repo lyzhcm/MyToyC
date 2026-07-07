@@ -9,6 +9,13 @@ let expect_tokens source expected =
 let expect_parse source =
   ignore (Mytoyc.Driver.parse source)
 
+let expect_parse_error source =
+  try
+    ignore (Mytoyc.Driver.parse source);
+    failwith "expected parse error"
+  with
+  | Mytoyc.Parser.Error -> ()
+
 let expect_check source =
   source |> Mytoyc.Driver.parse |> Mytoyc.Sema.check_program |> ignore
 
@@ -87,6 +94,23 @@ int main() {
   expect_parse "int main(){ return -(1 + 2); }";
   expect_parse "int main(){ return 1 < 2 && 3 != 4; }";
   expect_parse "int main(){ int a = 1; int b = 2; a = a + b; return a; }";
+  expect_parse_error "";
+  expect_parse_error "int x;";
+  expect_parse_error "int main(){ int x; return 0; }";
+  expect_parse "int g = 1; int main(){ return g; }";
+  expect_parse "const int c = 1; int main(){ return c; }";
+  expect_parse "void noop(){ return; } int main(){ return 0; }";
+  expect_parse "int main(){ ; return 0; }";
+  expect_parse "int main(){ 1 + 2; return 0; }";
+  expect_parse "int main(){ if (1) if (0) return 1; else return 2; return 0; }";
+  expect_parse "void f(){ return; } int main(){ f(); return 0; }";
+  expect_parse "int id(int x){ return x; } int main(){ return id(1); }";
+  expect_parse
+    "int add(int a, int b){ return a + b; } int main(){ return add(1, 2); }";
+  expect_parse
+    "int main(){ return +1 - -2 * !3 / 4 % 5 + (6); }";
+  expect_parse
+    "int main(){ return 1 < 2 || 3 > 4 || 5 <= 6 || 7 >= 8 || 9 == 10 || 11 != 12; }";
   expect_parse
     {|
 const int answer = 42;
@@ -122,7 +146,7 @@ int main() {
     [ ".globl main"; "li t0, 1"; "li t1, 2"; "add"; "mv t0"; "mv a0, t0";
       "ret" ];
   expect_compile_error "int main(){ return a; }" "undefined variable: a";
-  expect_compile_error "int main(){ int a; int a; return a; }"
+  expect_compile_error "int main(){ int a = 0; int a = 1; return a; }"
     "duplicate variable: a";
   expect_check_error "int main(){ break; return 0; }" "break outside loop";
   expect_check_error "int main(){ return missing(); }" "undefined function: missing";

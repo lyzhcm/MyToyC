@@ -12,13 +12,6 @@ open Ast
 %token AND_AND OR_OR
 %token EOF
 
-%left OR_OR
-%left AND_AND
-%left EQ NE
-%left LT GT LE GE
-%left PLUS MINUS
-%left STAR SLASH PERCENT
-%right UPLUS UMINUS BANG
 %nonassoc IF_WITHOUT_ELSE
 %nonassoc ELSE
 
@@ -27,7 +20,7 @@ open Ast
 %%
 
 program:
-  | items = list(comp_item); EOF { items }
+  | items = nonempty_list(comp_item); EOF { items }
 
 comp_item:
   | d = const_decl { GlobalDecl d }
@@ -35,7 +28,6 @@ comp_item:
   | f = void_func { FuncDef f }
 
 int_comp_item:
-  | name = IDENT; SEMICOLON { GlobalDecl (VarDecl (name, None)) }
   | name = IDENT; ASSIGN; value = expr; SEMICOLON
     { GlobalDecl (VarDecl (name, Some value)) }
   | name = IDENT; LPAREN; params = separated_list(COMMA, param); RPAREN; LBRACE; body = list(stmt); RBRACE
@@ -51,7 +43,6 @@ const_decl:
 
 decl:
   | d = const_decl { d }
-  | INT; name = IDENT; SEMICOLON { VarDecl (name, None) }
   | INT; name = IDENT; ASSIGN; value = expr; SEMICOLON { VarDecl (name, Some value) }
 
 param:
@@ -73,23 +64,44 @@ stmt:
   | RETURN; value = option(expr); SEMICOLON { Return value }
 
 expr:
+  | e = lor_expr { e }
+
+lor_expr:
+  | e = land_expr { e }
+  | lhs = lor_expr; OR_OR; rhs = land_expr { Binary (LOr, lhs, rhs) }
+
+land_expr:
+  | e = rel_expr { e }
+  | lhs = land_expr; AND_AND; rhs = rel_expr { Binary (LAnd, lhs, rhs) }
+
+rel_expr:
+  | e = add_expr { e }
+  | lhs = rel_expr; LT; rhs = add_expr { Binary (Lt, lhs, rhs) }
+  | lhs = rel_expr; GT; rhs = add_expr { Binary (Gt, lhs, rhs) }
+  | lhs = rel_expr; LE; rhs = add_expr { Binary (Le, lhs, rhs) }
+  | lhs = rel_expr; GE; rhs = add_expr { Binary (Ge, lhs, rhs) }
+  | lhs = rel_expr; EQ; rhs = add_expr { Binary (Eq, lhs, rhs) }
+  | lhs = rel_expr; NE; rhs = add_expr { Binary (Ne, lhs, rhs) }
+
+add_expr:
+  | e = mul_expr { e }
+  | lhs = add_expr; PLUS; rhs = mul_expr { Binary (Add, lhs, rhs) }
+  | lhs = add_expr; MINUS; rhs = mul_expr { Binary (Sub, lhs, rhs) }
+
+mul_expr:
+  | e = unary_expr { e }
+  | lhs = mul_expr; STAR; rhs = unary_expr { Binary (Mul, lhs, rhs) }
+  | lhs = mul_expr; SLASH; rhs = unary_expr { Binary (Div, lhs, rhs) }
+  | lhs = mul_expr; PERCENT; rhs = unary_expr { Binary (Mod, lhs, rhs) }
+
+unary_expr:
+  | e = primary_expr { e }
+  | PLUS; e = unary_expr { Unary (Pos, e) }
+  | MINUS; e = unary_expr { Unary (Neg, e) }
+  | BANG; e = unary_expr { Unary (LNot, e) }
+
+primary_expr:
   | n = NUMBER { Int n }
   | name = IDENT { Var name }
   | name = IDENT; LPAREN; args = separated_list(COMMA, expr); RPAREN { Call (name, args) }
   | LPAREN; e = expr; RPAREN { e }
-  | PLUS; e = expr %prec UPLUS { Unary (Pos, e) }
-  | MINUS; e = expr %prec UMINUS { Unary (Neg, e) }
-  | BANG; e = expr { Unary (LNot, e) }
-  | lhs = expr; PLUS; rhs = expr { Binary (Add, lhs, rhs) }
-  | lhs = expr; MINUS; rhs = expr { Binary (Sub, lhs, rhs) }
-  | lhs = expr; STAR; rhs = expr { Binary (Mul, lhs, rhs) }
-  | lhs = expr; SLASH; rhs = expr { Binary (Div, lhs, rhs) }
-  | lhs = expr; PERCENT; rhs = expr { Binary (Mod, lhs, rhs) }
-  | lhs = expr; LT; rhs = expr { Binary (Lt, lhs, rhs) }
-  | lhs = expr; GT; rhs = expr { Binary (Gt, lhs, rhs) }
-  | lhs = expr; LE; rhs = expr { Binary (Le, lhs, rhs) }
-  | lhs = expr; GE; rhs = expr { Binary (Ge, lhs, rhs) }
-  | lhs = expr; EQ; rhs = expr { Binary (Eq, lhs, rhs) }
-  | lhs = expr; NE; rhs = expr { Binary (Ne, lhs, rhs) }
-  | lhs = expr; AND_AND; rhs = expr { Binary (LAnd, lhs, rhs) }
-  | lhs = expr; OR_OR; rhs = expr { Binary (LOr, lhs, rhs) }
