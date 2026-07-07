@@ -5,9 +5,16 @@ type operand =
   | Reg of vreg
 
 type instr =
+  | LoadParam of vreg * int
   | Move of vreg * operand
   | Unary of vreg * Ast.unop * operand
   | Binary of vreg * Ast.binop * operand * operand
+  | LoadGlobal of vreg * string
+  | StoreGlobal of string * operand
+  | Call of vreg option * string * operand list
+  | Label of string
+  | BranchZero of operand * string
+  | Jump of string
   | Return of operand
 
 type func = {
@@ -15,4 +22,12 @@ type func = {
   body : instr list;
 }
 
-type program = func list
+type global = {
+  name : string;
+  init : int;
+}
+
+type program = {
+  globals : global list;
+  funcs : func list;
+}
