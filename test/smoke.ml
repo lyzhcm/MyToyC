@@ -156,6 +156,8 @@ int main() {
   expect_parse
     "int main(){ return 1 < 2 || 3 > 4 || 5 <= 6 || 7 >= 8 || 9 == 10 || 11 != 12; }";
   expect_parse
+    "void noop(){} int g = 1; const int c = 2; int main(){ { int x = g + c; } return 0; }";
+  expect_parse
     {|
 const int answer = 42;
 int add(int a, int b) {
@@ -288,4 +290,20 @@ int main() {
     9;
   expect_run_result
     "int fact(int x){ if (x <= 1) return 1; return x * fact(x - 1); } int main(){ return fact(5); }"
-    120
+    120;
+  expect_run_result "void noop(){ } int main(){ noop(); return 7; }" 7;
+  expect_run_result
+    "void maybe(int x){ if (x) return; } int main(){ maybe(0); maybe(1); return 8; }"
+    8;
+  expect_run_result
+    "int g = 1; void set(){ g = g + 4; } int main(){ set(); return g; }"
+    5;
+  expect_run_result
+    "int main(){ int a = 2; int b = 3; int c = 4; return +a * -(b + c) + !0 + (a <= b) * 10; }"
+    (-3);
+  expect_run_result
+    "const int c = 3; int g = 4; void bump(){ g = g + c; } int choose(int x){ if (x > 0) { int y = x + g; { int z = y * 2; y = z - c; } return y; } else { while (x < 0) { x = x + 1; if (x == 0) break; } return x; } } int main(){ bump(); return choose(1); }"
+    13;
+  expect_run_result
+    "int id(int x){ return x; } int main(){ return !(1 + 2 * 3 - 7) + ((id(5) > 3 && 0) || (4 / 2 == 2)); }"
+    2

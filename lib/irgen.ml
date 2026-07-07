@@ -310,6 +310,11 @@ let lower_func base_env ?(global_init_decls = []) func =
         (env, code @ stmt_code))
       (env, param_moves @ global_init_code) func.Ast.body
   in
+  let body =
+    match func.Ast.return_type with
+    | Ast.TVoid -> body @ [ Ir.Return (Ir.Imm 0) ]
+    | Ast.TInt -> body
+  in
   { Ir.name = func.Ast.name; body }
 
 let build_global_env (program : Ast.program) =
@@ -333,21 +338,26 @@ let build_func_env (program : Ast.program) =
 let bool_to_int value =
   if value then 1 else 0
 
+let i32 value =
+  Int32.to_int (Int32.of_int value)
+
 let apply_unop op value =
   match op with
-  | Ast.Pos -> value
-  | Ast.Neg -> -value
+  | Ast.Pos -> i32 value
+  | Ast.Neg -> i32 (-value)
   | Ast.LNot -> bool_to_int (value = 0)
 
 let apply_binop op lhs rhs =
   match op with
-  | Ast.Add -> Some (lhs + rhs)
-  | Ast.Sub -> Some (lhs - rhs)
-  | Ast.Mul -> Some (lhs * rhs)
+  | Ast.Add -> Some (i32 (lhs + rhs))
+  | Ast.Sub -> Some (i32 (lhs - rhs))
+  | Ast.Mul -> Some (i32 (lhs * rhs))
   | Ast.Div ->
-      if rhs = 0 then None else Some (lhs / rhs)
+      if rhs = 0 then None
+      else Some Int32.(to_int (div (of_int lhs) (of_int rhs)))
   | Ast.Mod ->
-      if rhs = 0 then None else Some (lhs mod rhs)
+      if rhs = 0 then None
+      else Some Int32.(to_int (rem (of_int lhs) (of_int rhs)))
   | Ast.Lt -> Some (bool_to_int (lhs < rhs))
   | Ast.Gt -> Some (bool_to_int (lhs > rhs))
   | Ast.Le -> Some (bool_to_int (lhs <= rhs))
@@ -413,9 +423,6 @@ let lower_program (program : Ast.program) : Ir.program =
     |> List.filter_map (function
          | Ast.GlobalDecl _ -> None
          | Ast.FuncDef func ->
-             let global_init_decls =
-               if func.Ast.name = "main" then global_init_decls else []
-             in
              Some (lower_func base_env ~global_init_decls func))
   in
   { Ir.globals; funcs }

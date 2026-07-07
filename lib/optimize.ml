@@ -1,18 +1,25 @@
 module IntMap = Map.Make (Int)
 
+let i32 value =
+  Int32.to_int (Int32.of_int value)
+
 let apply_unop op value =
   match op with
-  | Ast.Pos -> value
-  | Ast.Neg -> -value
+  | Ast.Pos -> i32 value
+  | Ast.Neg -> i32 (-value)
   | Ast.LNot -> if value = 0 then 1 else 0
 
 let apply_binop op lhs rhs =
   match op with
-  | Ast.Add -> Some (lhs + rhs)
-  | Ast.Sub -> Some (lhs - rhs)
-  | Ast.Mul -> Some (lhs * rhs)
-  | Ast.Div -> if rhs = 0 then None else Some (lhs / rhs)
-  | Ast.Mod -> if rhs = 0 then None else Some (lhs mod rhs)
+  | Ast.Add -> Some (i32 (lhs + rhs))
+  | Ast.Sub -> Some (i32 (lhs - rhs))
+  | Ast.Mul -> Some (i32 (lhs * rhs))
+  | Ast.Div ->
+      if rhs = 0 then None
+      else Some Int32.(to_int (div (of_int lhs) (of_int rhs)))
+  | Ast.Mod ->
+      if rhs = 0 then None
+      else Some Int32.(to_int (rem (of_int lhs) (of_int rhs)))
   | Ast.Lt -> Some (if lhs < rhs then 1 else 0)
   | Ast.Gt -> Some (if lhs > rhs then 1 else 0)
   | Ast.Le -> Some (if lhs <= rhs then 1 else 0)

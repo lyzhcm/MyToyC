@@ -78,23 +78,26 @@ let ensure_int context = function
 let bool_to_int value =
   if value then 1 else 0
 
+let i32 value =
+  Int32.to_int (Int32.of_int value)
+
 let apply_unop op value =
   match op with
-  | Ast.Pos -> value
-  | Ast.Neg -> -value
+  | Ast.Pos -> i32 value
+  | Ast.Neg -> i32 (-value)
   | Ast.LNot -> bool_to_int (value = 0)
 
 let apply_binop op lhs rhs =
   match op with
-  | Ast.Add -> lhs + rhs
-  | Ast.Sub -> lhs - rhs
-  | Ast.Mul -> lhs * rhs
+  | Ast.Add -> i32 (lhs + rhs)
+  | Ast.Sub -> i32 (lhs - rhs)
+  | Ast.Mul -> i32 (lhs * rhs)
   | Ast.Div ->
       if rhs = 0 then Diagnostic.fail "division by zero in constant expression";
-      lhs / rhs
+      Int32.(to_int (div (of_int lhs) (of_int rhs)))
   | Ast.Mod ->
       if rhs = 0 then Diagnostic.fail "modulo by zero in constant expression";
-      lhs mod rhs
+      Int32.(to_int (rem (of_int lhs) (of_int rhs)))
   | Ast.Lt -> bool_to_int (lhs < rhs)
   | Ast.Gt -> bool_to_int (lhs > rhs)
   | Ast.Le -> bool_to_int (lhs <= rhs)
