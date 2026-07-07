@@ -30,7 +30,7 @@ let leading_zero_decimal = '0' digit+
 let hexadecimal = '0' ['x' 'X'] (digit | ['a'-'f' 'A'-'F'])+
 
 rule token = parse
-  | [' ' '\t' '\r'] { token lexbuf }
+  | [' ' '\t' '\r' '\011' '\012'] { token lexbuf }
   | '\n' { Lexing.new_line lexbuf; token lexbuf }
   | "//" { line_comment lexbuf }
   | "/*" { block_comment lexbuf }

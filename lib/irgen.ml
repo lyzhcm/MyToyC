@@ -19,6 +19,9 @@ type env = {
 
 let global_init_guard_name = "__mytoyc_init_done"
 
+let i32 value =
+  Int32.to_int (Int32.of_int value)
+
 let empty_env =
   {
     locals = Symbol.StringMap.empty;
@@ -68,7 +71,7 @@ let current_loop env =
   | [] -> Diagnostic.fail "internal error: loop target missing"
 
 let rec lower_expr env = function
-  | Ast.Int value -> (env, [], Ir.Imm value)
+  | Ast.Int value -> (env, [], Ir.Imm (i32 value))
   | Ast.Var name -> lower_var env name
   | Ast.Unary (op, expr) ->
       let env, code, operand = lower_expr env expr in
@@ -338,9 +341,6 @@ let build_func_env (program : Ast.program) =
 let bool_to_int value =
   if value then 1 else 0
 
-let i32 value =
-  Int32.to_int (Int32.of_int value)
-
 let apply_unop op value =
   match op with
   | Ast.Pos -> i32 value
@@ -368,7 +368,7 @@ let apply_binop op lhs rhs =
   | Ast.LOr -> Some (bool_to_int (lhs <> 0 || rhs <> 0))
 
 let rec eval_static_expr consts = function
-  | Ast.Int value -> Some value
+  | Ast.Int value -> Some (i32 value)
   | Ast.Var name -> Symbol.StringMap.find_opt name consts
   | Ast.Unary (op, expr) -> Option.map (apply_unop op) (eval_static_expr consts expr)
   | Ast.Binary (op, lhs, rhs) -> (
@@ -423,6 +423,9 @@ let lower_program (program : Ast.program) : Ir.program =
     |> List.filter_map (function
          | Ast.GlobalDecl _ -> None
          | Ast.FuncDef func ->
+             let global_init_decls =
+               if func.Ast.name = "main" then global_init_decls else []
+             in
              Some (lower_func base_env ~global_init_decls func))
   in
   { Ir.globals; funcs }

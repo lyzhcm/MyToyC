@@ -108,7 +108,7 @@ let apply_binop op lhs rhs =
   | Ast.LOr -> bool_to_int (lhs <> 0 || rhs <> 0)
 
 let rec eval_const_expr env = function
-  | Ast.Int value -> value
+  | Ast.Int value -> i32 value
   | Ast.Var name -> (
       match find_binding env name with
       | Some { const_value = Some value; _ } -> value

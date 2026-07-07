@@ -312,4 +312,7 @@ int main() {
     7;
   expect_run_result
     "int main(){ return 1 != 2 < 3; }"
-    0
+    0;
+  expect_compile_contains
+    "int main(){ return -2147483648; }"
+    [ "-2147483648"; "ret" ]
