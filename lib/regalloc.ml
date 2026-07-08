@@ -74,6 +74,15 @@ let build_graph func =
       (fun graph live_set -> add_clique graph live_set)
       graph liveness.live_out
   in
+  let graph = ref graph in
+  for index = 0 to Array.length cfg.defs - 1 do
+    graph :=
+      IntSet.fold
+        (fun def graph ->
+          IntSet.fold (fun live graph -> add_edge graph def live) liveness.live_out.(index) graph)
+        cfg.defs.(index) !graph
+  done;
+  let graph = !graph in
   (cfg, liveness, graph)
 
 let choose_location used_phys spill_slot neighbors allocation =

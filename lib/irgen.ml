@@ -155,6 +155,55 @@ and lower_call_expr env name args =
       let env, code = lower_call env (Some dest) name args in
       (env, code, Ir.Reg dest)
 
+let static_bool value =
+  if value then 1 else 0
+
+let static_unop op value =
+  match op with
+  | Ast.Pos -> i32 value
+  | Ast.Neg -> i32 (-value)
+  | Ast.LNot -> if value = 0 then 1 else 0
+
+let static_binop_value op lhs rhs =
+  match op with
+  | Ast.Add -> Some (i32 (lhs + rhs))
+  | Ast.Sub -> Some (i32 (lhs - rhs))
+  | Ast.Mul -> Some (i32 (lhs * rhs))
+  | Ast.Div -> if rhs = 0 then None else Some Int32.(to_int (div (of_int lhs) (of_int rhs)))
+  | Ast.Mod -> if rhs = 0 then None else Some Int32.(to_int (rem (of_int lhs) (of_int rhs)))
+  | Ast.Lt -> Some (static_bool (lhs < rhs))
+  | Ast.Gt -> Some (static_bool (lhs > rhs))
+  | Ast.Le -> Some (static_bool (lhs <= rhs))
+  | Ast.Ge -> Some (static_bool (lhs >= rhs))
+  | Ast.Eq -> Some (static_bool (lhs = rhs))
+  | Ast.Ne -> Some (static_bool (lhs <> rhs))
+  | Ast.LAnd -> Some (static_bool (lhs <> 0 && rhs <> 0))
+  | Ast.LOr -> Some (static_bool (lhs <> 0 || rhs <> 0))
+
+let rec static_expr = function
+  | Ast.Int value -> Some (i32 value)
+  | Ast.Var _ | Ast.Call _ -> None
+  | Ast.Unary (op, expr) -> Option.map (static_unop op) (static_expr expr)
+  | Ast.Binary (Ast.LAnd, lhs, rhs) -> (
+      match static_expr lhs with
+      | Some 0 -> Some 0
+      | Some _ -> Option.map (fun value -> static_bool (value <> 0)) (static_expr rhs)
+      | None -> static_binop Ast.LAnd lhs rhs)
+  | Ast.Binary (Ast.LOr, lhs, rhs) -> (
+      match static_expr lhs with
+      | Some 0 -> Option.map (fun value -> static_bool (value <> 0)) (static_expr rhs)
+      | Some _ -> Some 1
+      | None -> static_binop Ast.LOr lhs rhs)
+  | Ast.Binary (op, lhs, rhs) -> static_binop op lhs rhs
+
+and static_binop op lhs rhs =
+  match (static_expr lhs, static_expr rhs) with
+  | _, Some 0 when op = Ast.Div || op = Ast.Mod -> None
+  | Some lhs, Some rhs -> static_binop_value op lhs rhs
+  | _ -> None
+
+let static_truth expr =
+  Option.map (fun value -> value <> 0) (static_expr expr)
 let lower_decl env = function
   | Ast.ConstDecl (name, expr) | Ast.VarDecl (name, Some expr) ->
       let env, code, value = lower_expr env expr in
@@ -220,7 +269,7 @@ and lower_if env cond then_branch else_branch =
   match else_branch with
   | None ->
       let end_label, env = fresh_label env "if_end" in
-      let env, then_code = lower_scoped_stmt env then_branch in
+      let env, then_code = lower_stmt env then_branch in
       ( env,
         cond_code
         @ [ Ir.BranchZero (cond_value, end_label) ]
@@ -229,9 +278,15 @@ and lower_if env cond then_branch else_branch =
   | Some else_branch ->
       let else_label, env = fresh_label env "if_else" in
       let end_label, env = fresh_label env "if_end" in
-      let env, then_code = lower_scoped_stmt env then_branch in
-      let env, else_code = lower_scoped_stmt env else_branch in
-      ( env,
+      let then_env, then_code = lower_stmt env then_branch in
+      let else_env, else_code = lower_stmt env else_branch in
+      let result_env =
+        match static_truth cond with
+        | Some true -> then_env
+        | Some false -> else_env
+        | None -> env
+      in
+      ( result_env,
         cond_code
         @ [ Ir.BranchZero (cond_value, else_label) ]
         @ then_code
@@ -246,8 +301,7 @@ and lower_while env cond body =
   let loop_env =
     { env with loops = { break_label = end_label; continue_label = cond_label } :: env.loops }
   in
-  let loop_env, body_code = lower_scoped_stmt loop_env body in
-  let env = { loop_env with loops = env.loops } in
+  let _, body_code = lower_stmt loop_env body in
   ( env,
     [ Ir.Label cond_label ]
     @ cond_code
@@ -338,14 +392,14 @@ let build_func_env (program : Ast.program) =
           Symbol.StringMap.add func.Ast.name { return_type = func.return_type } funcs)
     Symbol.StringMap.empty program
 
-let bool_to_int value =
+let static_bool value =
   if value then 1 else 0
 
 let apply_unop op value =
   match op with
   | Ast.Pos -> i32 value
   | Ast.Neg -> i32 (-value)
-  | Ast.LNot -> bool_to_int (value = 0)
+  | Ast.LNot -> static_bool (value = 0)
 
 let apply_binop op lhs rhs =
   match op with
@@ -358,14 +412,14 @@ let apply_binop op lhs rhs =
   | Ast.Mod ->
       if rhs = 0 then None
       else Some Int32.(to_int (rem (of_int lhs) (of_int rhs)))
-  | Ast.Lt -> Some (bool_to_int (lhs < rhs))
-  | Ast.Gt -> Some (bool_to_int (lhs > rhs))
-  | Ast.Le -> Some (bool_to_int (lhs <= rhs))
-  | Ast.Ge -> Some (bool_to_int (lhs >= rhs))
-  | Ast.Eq -> Some (bool_to_int (lhs = rhs))
-  | Ast.Ne -> Some (bool_to_int (lhs <> rhs))
-  | Ast.LAnd -> Some (bool_to_int (lhs <> 0 && rhs <> 0))
-  | Ast.LOr -> Some (bool_to_int (lhs <> 0 || rhs <> 0))
+  | Ast.Lt -> Some (static_bool (lhs < rhs))
+  | Ast.Gt -> Some (static_bool (lhs > rhs))
+  | Ast.Le -> Some (static_bool (lhs <= rhs))
+  | Ast.Ge -> Some (static_bool (lhs >= rhs))
+  | Ast.Eq -> Some (static_bool (lhs = rhs))
+  | Ast.Ne -> Some (static_bool (lhs <> rhs))
+  | Ast.LAnd -> Some (static_bool (lhs <> 0 && rhs <> 0))
+  | Ast.LOr -> Some (static_bool (lhs <> 0 || rhs <> 0))
 
 let rec eval_static_expr consts = function
   | Ast.Int value -> Some (i32 value)

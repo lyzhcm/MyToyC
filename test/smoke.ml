@@ -316,3 +316,32 @@ int main() {
   expect_compile_contains
     "int main(){ return -2147483648; }"
     [ "-2147483648"; "ret" ]
+
+let () =
+  expect_run_result
+    "int f(int x){ return x + 1; } int g(int x){ return x * 2; } int main(){ return f(10) + g(20) * f(1); }"
+    91;
+  expect_run_result
+    "int main(){ int x = 1; if (1) x = x + 2; while (x < 5) x = x + 1; return x; }"
+    5;
+  expect_run_result
+    "int acc = 0; int add(int x){ acc = acc + x; return acc; } int fib(int n){ if (n <= 1) return n; return fib(n - 1) + fib(n - 2); } int main(){ int i = 0; int s = 0; while (i < 6) { s = s + fib(i); add(i); i = i + 1; } return s + acc; }"
+    27
+
+
+let () =
+  expect_run_result "const int c = 0 && (1 / 0); int main(){ return c; }" 0;
+  expect_run_result "const int c = 1 || (1 / 0); int main(){ return c; }" 1
+
+let () =
+  expect_run_result "int f(){ if (1 || (1 / 0)) return 1; } int main(){ return f(); }" 1;
+  expect_run_result "int f(){ if (0 && (1 / 0)) return 1; else return 2; } int main(){ return f(); }" 2
+
+let () =
+  expect_run_result "int main(){ if (1) int x = 3; return x; }" 3;
+  expect_run_result "int main(){ int x = 1; if (1) { int x = 3; } return x; }" 1;
+  expect_run_result "int main(){ int x = 1; if (1) x = x + 4; return x; }" 5
+
+let () =
+  expect_run_result "int main(){ int y = 0; if (1) int x = 3; else y = 2; return x + y; }" 3;
+  expect_run_result "int main(){ int y = 0; if (0) y = 2; else int x = 4; return x + y; }" 4

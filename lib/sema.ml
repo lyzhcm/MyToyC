@@ -118,6 +118,14 @@ let rec eval_const_expr env = function
                "const initializer must be a compile-time constant: %s" name)
       | None -> Diagnostic.fail (Printf.sprintf "undefined variable: %s" name))
   | Ast.Unary (op, expr) -> apply_unop op (eval_const_expr env expr)
+  | Ast.Binary (Ast.LAnd, lhs, rhs) ->
+      let lhs_value = eval_const_expr env lhs in
+      if lhs_value = 0 then 0
+      else bool_to_int (eval_const_expr env rhs <> 0)
+  | Ast.Binary (Ast.LOr, lhs, rhs) ->
+      let lhs_value = eval_const_expr env lhs in
+      if lhs_value <> 0 then 1
+      else bool_to_int (eval_const_expr env rhs <> 0)
   | Ast.Binary (op, lhs, rhs) ->
       apply_binop op (eval_const_expr env lhs) (eval_const_expr env rhs)
   | Ast.Call (name, _) ->
@@ -168,6 +176,30 @@ let check_decl env = function
         init;
       declare_local env name { mutable_ = true; const_value = None }
 
+let rec early_static_expr = function
+  | Ast.Int value -> Some (i32 value)
+  | Ast.Var _ | Ast.Call _ -> None
+  | Ast.Unary (op, expr) -> Option.map (apply_unop op) (early_static_expr expr)
+  | Ast.Binary (Ast.LAnd, lhs, rhs) -> (
+      match early_static_expr lhs with
+      | Some 0 -> Some 0
+      | Some _ -> Option.map (fun value -> bool_to_int (value <> 0)) (early_static_expr rhs)
+      | None -> early_static_binop Ast.LAnd lhs rhs)
+  | Ast.Binary (Ast.LOr, lhs, rhs) -> (
+      match early_static_expr lhs with
+      | Some 0 -> Option.map (fun value -> bool_to_int (value <> 0)) (early_static_expr rhs)
+      | Some _ -> Some 1
+      | None -> early_static_binop Ast.LOr lhs rhs)
+  | Ast.Binary (op, lhs, rhs) -> early_static_binop op lhs rhs
+
+and early_static_binop op lhs rhs =
+  match (early_static_expr lhs, early_static_expr rhs) with
+  | _, Some 0 when op = Ast.Div || op = Ast.Mod -> None
+  | Some lhs, Some rhs -> Some (apply_binop op lhs rhs)
+  | _ -> None
+
+let early_const_truth expr =
+  Option.map (fun value -> value <> 0) (early_static_expr expr)
 let rec check_stmt return_type env = function
   | Ast.Block body ->
       let block_env = enter_scope env in
@@ -184,17 +216,23 @@ let rec check_stmt return_type env = function
   | Ast.ExprStmt expr ->
       ignore (check_expr env expr);
       env
-  | Ast.If (cond, then_branch, else_branch) ->
+  | Ast.If (cond, then_branch, None) ->
       ensure_int "if condition" (check_expr env cond);
-      ignore (check_stmt return_type (enter_scope env) then_branch);
-      Option.iter
-        (fun stmt -> ignore (check_stmt return_type (enter_scope env) stmt))
-        else_branch;
-      env
+      check_stmt return_type env then_branch
+  | Ast.If (cond, then_branch, Some else_branch) ->
+      ensure_int "if condition" (check_expr env cond);
+      begin
+        match early_const_truth cond with
+        | Some true -> check_stmt return_type env then_branch
+        | Some false -> check_stmt return_type env else_branch
+        | None ->
+            ignore (check_stmt return_type env then_branch);
+            ignore (check_stmt return_type env else_branch);
+            env
+      end
   | Ast.While (cond, body) ->
       ensure_int "while condition" (check_expr env cond);
-      ignore
-        (check_stmt return_type (enter_scope { env with in_loop = true }) body);
+      ignore (check_stmt return_type { env with in_loop = true } body);
       env
   | Ast.Break ->
       if not env.in_loop then Diagnostic.fail "break outside loop";
@@ -215,6 +253,16 @@ let rec eval_static_expr = function
   | Ast.Int value -> Some value
   | Ast.Var _ | Ast.Call _ -> None
   | Ast.Unary (op, expr) -> Option.map (apply_unop op) (eval_static_expr expr)
+  | Ast.Binary (Ast.LAnd, lhs, rhs) -> (
+      match eval_static_expr lhs with
+      | Some 0 -> Some 0
+      | Some _ -> Option.map (fun value -> bool_to_int (value <> 0)) (eval_static_expr rhs)
+      | None -> eval_static_binop Ast.LAnd lhs rhs)
+  | Ast.Binary (Ast.LOr, lhs, rhs) -> (
+      match eval_static_expr lhs with
+      | Some 0 -> Option.map (fun value -> bool_to_int (value <> 0)) (eval_static_expr rhs)
+      | Some _ -> Some 1
+      | None -> eval_static_binop Ast.LOr lhs rhs)
   | Ast.Binary (op, lhs, rhs) -> eval_static_binop op lhs rhs
 
 and eval_static_binop op lhs rhs =
@@ -235,7 +283,7 @@ let rec stmt_must_return = function
   | Ast.Return _ -> true
   | Ast.Block body -> block_must_return body
   | Ast.If (cond, then_branch, else_branch) -> (
-      match const_truth cond with
+      match early_const_truth cond with
       | Some true -> stmt_must_return then_branch
       | Some false ->
           option_map_default else_branch ~default:false ~f:stmt_must_return
@@ -245,7 +293,7 @@ let rec stmt_must_return = function
               stmt_must_return then_branch && stmt_must_return else_branch
           | None -> false))
   | Ast.While (cond, body) -> (
-      match const_truth cond with
+      match early_const_truth cond with
       | Some false -> false
       | Some true ->
           let body_breaks = stmt_may_break body in
@@ -267,7 +315,7 @@ and stmt_may_fallthrough = function
   | Ast.Empty | Ast.DeclStmt _ | Ast.Assign _ | Ast.ExprStmt _ -> true
   | Ast.Block body -> block_may_fallthrough body
   | Ast.If (cond, then_branch, else_branch) -> (
-      match const_truth cond with
+      match early_const_truth cond with
       | Some true -> stmt_may_fallthrough then_branch
       | Some false ->
           option_map_default else_branch ~default:true ~f:stmt_may_fallthrough
@@ -278,7 +326,7 @@ and stmt_may_fallthrough = function
               || stmt_may_fallthrough else_branch
           | None -> true))
   | Ast.While (cond, body) -> (
-      match const_truth cond with
+      match early_const_truth cond with
       | Some false -> true
       | Some true -> stmt_may_break body
       | None -> true)
@@ -296,7 +344,7 @@ and stmt_may_break = function
       false
   | Ast.Block body -> block_may_break body
   | Ast.If (cond, then_branch, else_branch) -> (
-      match const_truth cond with
+      match early_const_truth cond with
       | Some true -> stmt_may_break then_branch
       | Some false ->
           option_map_default else_branch ~default:false ~f:stmt_may_break
