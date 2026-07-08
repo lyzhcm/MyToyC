@@ -286,27 +286,34 @@ int main() {
       "j .L_main_lor_end_" ];
   expect_compile_contains
     "int id(int x){ return x; } int main(){ return id(1); }"
-    [ ".globl id"; "call id"; "ret" ];
+    [ ".globl __mytoyc_id"; "call __mytoyc_id"; "ret" ];
+  expect_run_result
+    "int ret = 5; int add(int a0, int t0){ return a0 + t0 + ret; } int main(){ int a0 = 1; return add(a0, 2); }"
+    8;
+  expect_compile_contains
+    "int ret = 5; int add(int a0, int t0){ return a0 + t0 + ret; } int main(){ return add(1, 2); }"
+    [ ".globl __mytoyc_ret"; "__mytoyc_ret:"; ".globl __mytoyc_add";
+      "call __mytoyc_add"; "la t0, __mytoyc_ret" ];
   expect_compile_contains
     "void noop(){ return; } int main(){ noop(); return 0; }"
-    [ ".globl noop"; "call noop"; "ret" ];
+    [ ".globl __mytoyc_noop"; "call __mytoyc_noop"; "ret" ];
   expect_compile_contains
     "int g = 1; int main(){ return g; }"
-    [ ".data"; ".globl g"; "g:"; ".word 1"; "la t0, g"; "ret" ];
+    [ ".data"; ".globl __mytoyc_g"; "__mytoyc_g:"; ".word 1"; "la t0, __mytoyc_g"; "ret" ];
   expect_compile_contains
     "int g = 1; int inc(int x){ return x + 1; } int main(){ g = inc(g); return g; }"
-    [ ".data"; "call inc"; "la t1, g"; "ret" ];
+    [ ".data"; "call __mytoyc_inc"; "la t1, __mytoyc_g"; "ret" ];
   expect_compile_contains
     "const int a = 2; int g = a + 3; int main(){ return g; }"
     [ ".data"; ".word 5" ];
   expect_compile_contains
     "int init(){ return 7; } int g = init(); int main(){ return g; }"
-    [ "__mytoyc_init_done"; ".L_main_global_init_"; "call init" ];
+    [ "__mytoyc___mytoyc_init_done"; ".L_main_global_init_"; "call __mytoyc_init" ];
   expect_compile_contains
     "int pick9(int a,int b,int c,int d,int e,int f,int g,int h,int i){ return i; } int main(){ return pick9(1,2,3,4,5,6,7,8,9); }"
-    [ "call pick9"; "sw t0, 0(sp)" ];
-  expect_real_riscv_immediates (many_locals_source 700);
-  expect_real_riscv_immediates (many_args_source 540);
+    [ "call __mytoyc_pick9"; "sw t0, 0(sp)" ];
+  expect_real_riscv_immediates (many_locals_source 530);
+  expect_real_riscv_immediates (many_args_source 520);
   expect_opt_compile_contains "int main(){ return 1 + 2 * 3; }"
     [ "li a0, 7"; "ret" ];
   expect_opt_compile_lacks "int main(){ return 1 + 2 * 3; }"

@@ -3,6 +3,8 @@ let align_to alignment value =
 
 let slot_offset slot = slot * 4
 
+let asm_symbol name =
+  if name = "main" then name else "__mytoyc_" ^ name
 let fits_imm12 value = value >= -2048 && value <= 2047
 
 let emit_addi rd rs imm =
@@ -118,7 +120,7 @@ let emit_load_param allocation dest index =
     emit_load_word target "s0" offset ^ emit_store allocation target dest
 
 let emit_global_address tmp name =
-  Printf.sprintf "  la %s, %s\n" tmp name
+  Printf.sprintf "  la %s, %s\n" tmp (asm_symbol name)
 
 let emit_load_global allocation dest name =
   let target =
@@ -161,7 +163,7 @@ let emit_call allocation dest name args =
     | None -> ""
     | Some reg -> emit_store allocation "a0" reg
   in
-  setup_stack ^ setup_args ^ Printf.sprintf "  call %s\n" name ^ cleanup_stack
+  setup_stack ^ setup_args ^ Printf.sprintf "  call %s\n" (asm_symbol name) ^ cleanup_stack
   ^ save_result
 
 let emit_return allocation operand =
@@ -194,7 +196,7 @@ let emit_instr allocation = function
   | Ir.Return operand -> emit_return allocation operand
 
 let emit_global global =
-  Printf.sprintf ".globl %s\n%s:\n  .word %d\n" global.Ir.name global.name
+  Printf.sprintf ".globl %s\n%s:\n  .word %d\n" (asm_symbol global.Ir.name) (asm_symbol global.name)
     global.init
 
 let emit_func func =
@@ -213,7 +215,7 @@ let emit_func func =
     ^ save_regs
     ^ "  mv s0, sp\n"
   in
-  Printf.sprintf ".globl %s\n%s:\n%s%s" func.Ir.name func.name prologue
+  Printf.sprintf ".globl %s\n%s:\n%s%s" (asm_symbol func.Ir.name) (asm_symbol func.name) prologue
     (func.body |> List.map (emit_instr allocation) |> String.concat "")
 
 let emit_program (program : Ir.program) =
