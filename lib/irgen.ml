@@ -312,8 +312,11 @@ and lower_while env cond body =
   let loop_env =
     { env with loops = { break_label = end_label; continue_label = cond_label } :: env.loops }
   in
-  let _, body_code = lower_stmt loop_env body in
-  ( env,
+  let body_env, body_code = lower_stmt loop_env body in
+  let result_env =
+    { env with next_reg = body_env.next_reg; next_label = body_env.next_label }
+  in
+  ( result_env,
     [ Ir.Label cond_label ]
     @ cond_code
     @ [ Ir.BranchZero (cond_value, end_label) ]
