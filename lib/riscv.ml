@@ -106,6 +106,13 @@ let emit_unop allocation dest op operand =
   in
   load ^ instr ^ emit_store allocation tmp dest
 
+let emit_shift_left allocation dest operand amount =
+  let operand_tmp = "t0" in
+  let dest_tmp = result_target allocation dest "t1" in
+  emit_load allocation operand_tmp operand
+  ^ Printf.sprintf "  slli %s, %s, %d\n" dest_tmp operand_tmp amount
+  ^ emit_store allocation dest_tmp dest
+
 let emit_load_param allocation dest index =
   let target =
     match Regalloc.location allocation dest with
@@ -186,6 +193,8 @@ let emit_instr allocation = function
       emit_load allocation "t0" operand ^ emit_store allocation "t0" dest
   | Ir.Unary (dest, op, operand) -> emit_unop allocation dest op operand
   | Ir.Binary (dest, op, lhs, rhs) -> emit_binop allocation dest op lhs rhs
+  | Ir.ShiftLeft (dest, operand, amount) ->
+      emit_shift_left allocation dest operand amount
   | Ir.LoadGlobal (dest, name) -> emit_load_global allocation dest name
   | Ir.StoreGlobal (name, operand) -> emit_store_global allocation name operand
   | Ir.Call (dest, name, args) -> emit_call allocation dest name args

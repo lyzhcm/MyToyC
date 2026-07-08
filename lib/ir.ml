@@ -9,6 +9,7 @@ type instr =
   | Move of vreg * operand
   | Unary of vreg * Ast.unop * operand
   | Binary of vreg * Ast.binop * operand * operand
+  | ShiftLeft of vreg * operand * int
   | LoadGlobal of vreg * string
   | StoreGlobal of string * operand
   | Call of vreg option * string * operand list

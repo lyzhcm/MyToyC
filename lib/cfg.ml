@@ -21,6 +21,8 @@ let instr_uses_defs = function
   | Ir.Unary (dest, _, operand) -> (operand_uses operand, IntSet.singleton dest)
   | Ir.Binary (dest, _, lhs, rhs) ->
       (IntSet.union (operand_uses lhs) (operand_uses rhs), IntSet.singleton dest)
+  | Ir.ShiftLeft (dest, operand, _) ->
+      (operand_uses operand, IntSet.singleton dest)
   | Ir.LoadGlobal (dest, _) -> (IntSet.empty, IntSet.singleton dest)
   | Ir.StoreGlobal (_, operand) -> (operand_uses operand, IntSet.empty)
   | Ir.Call (dest, _, args) ->

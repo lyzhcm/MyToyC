@@ -79,6 +79,27 @@ let expect_compile_exact source expected =
     failwith
       (Printf.sprintf "compile mismatch\nexpected:\n%s\nactual:\n%s" expected actual)
 
+let optimized_func_body source name =
+  let program =
+    source
+    |> Mytoyc.Driver.parse
+    |> Mytoyc.Sema.check_program
+    |> Mytoyc.Irgen.lower_program
+    |> Mytoyc.Optimize.run ~enabled:true
+  in
+  match
+    List.find_opt
+      (fun (func : Mytoyc.Ir.func) -> func.Mytoyc.Ir.name = name)
+      program.Mytoyc.Ir.funcs
+  with
+  | Some func -> func.Mytoyc.Ir.body
+  | None -> failwith (Printf.sprintf "optimized function not found: %s" name)
+
+let expect_optimized_func_body source name expected =
+  let actual = optimized_func_body source name in
+  if actual <> expected then
+    failwith (Printf.sprintf "optimized IR mismatch for function %s" name)
+
 let starts_with prefix text =
   let prefix_len = String.length prefix in
   String.length text >= prefix_len && String.sub text 0 prefix_len = prefix
@@ -343,6 +364,25 @@ int main() {
   expect_opt_compile_lacks
     "int main(){ int a = 1; int b = a + 2; return a; }"
     [ "li t0, 3"; "sw t0, 4(s0)" ];
+  expect_opt_compile_contains
+    "int main(){ int x = 3; int y = x; return y + 4; }"
+    [ "li a0, 7"; "ret" ];
+  expect_optimized_func_body
+    "int f(int x){ int y = x; return y; } int main(){ return f(1); }"
+    "f"
+    Mytoyc.Ir.( [ LoadParam (0, 0); Return (Reg 0) ] );
+  expect_opt_compile_contains
+    "int main(){ int x = 5; return x * 8; }"
+    [ "li a0, 40"; "ret" ];
+  expect_opt_compile_contains
+    "int f(int x){ return x * 8; } int main(){ return f(5); }"
+    [ "slli"; "ret" ];
+  expect_opt_compile_lacks
+    "int f(int x){ return x * 8; } int main(){ return f(5); }"
+    [ "  mul " ];
+  expect_opt_compile_lacks
+    "int main(){ if (1) return 3; else return 4; }"
+    [ "li a0, 4"; "beqz" ];
   expect_compile_error "int main(){ return a; }" "undefined variable: a";
   expect_compile_error "int main(){ int a = 0; int a = 1; return a; }"
     "duplicate variable: a";
