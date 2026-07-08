@@ -3,6 +3,22 @@ let align_to alignment value =
 
 let slot_offset slot = slot * 4
 
+let fits_imm12 value = value >= -2048 && value <= 2047
+
+let emit_addi rd rs imm =
+  if imm = 0 then ""
+  else if fits_imm12 imm then Printf.sprintf "  addi %s, %s, %d\n" rd rs imm
+  else Printf.sprintf "  li t6, %d\n  add %s, %s, t6\n" imm rd rs
+
+let emit_load_word target base offset =
+  if fits_imm12 offset then Printf.sprintf "  lw %s, %d(%s)\n" target offset base
+  else
+    Printf.sprintf "  li t6, %d\n  add t6, %s, t6\n  lw %s, 0(t6)\n" offset base target
+
+let emit_store_word source base offset =
+  if fits_imm12 offset then Printf.sprintf "  sw %s, %d(%s)\n" source offset base
+  else
+    Printf.sprintf "  li t6, %d\n  add t6, %s, t6\n  sw %s, 0(t6)\n" offset base source
 let emit_move target source =
   if target = source then "" else Printf.sprintf "  mv %s, %s\n" target source
 
@@ -25,13 +41,13 @@ let emit_load allocation target = function
       match Regalloc.location allocation reg with
       | Regalloc.Phys phys -> emit_move target phys
       | Regalloc.Stack slot ->
-          Printf.sprintf "  lw %s, %d(s0)\n" target (slot_offset slot))
+          emit_load_word target "s0" (slot_offset slot))
 
 let emit_store allocation source reg =
   match Regalloc.location allocation reg with
   | Regalloc.Phys phys -> emit_move phys source
   | Regalloc.Stack slot ->
-      Printf.sprintf "  sw %s, %d(s0)\n" source (slot_offset slot)
+      emit_store_word source "s0" (slot_offset slot)
 
 let emit_operand_to_a0 allocation operand = emit_load allocation "a0" operand
 
@@ -99,8 +115,7 @@ let emit_load_param allocation dest index =
       (emit_store allocation target dest)
   else
     let offset = frame_size allocation + ((index - 8) * 4) in
-    Printf.sprintf "  lw %s, %d(s0)\n%s" target offset
-      (emit_store allocation target dest)
+    emit_load_word target "s0" offset ^ emit_store allocation target dest
 
 let emit_global_address tmp name =
   Printf.sprintf "  la %s, %s\n" tmp name
@@ -124,7 +139,7 @@ let emit_call allocation dest name args =
   let stack_arg_bytes = align_to 16 (stack_arg_count * 4) in
   let setup_stack =
     if stack_arg_bytes = 0 then ""
-    else Printf.sprintf "  addi sp, sp, -%d\n" stack_arg_bytes
+    else emit_addi "sp" "sp" (-stack_arg_bytes)
   in
   let setup_args =
     args
@@ -134,12 +149,12 @@ let emit_call allocation dest name args =
            else
              let offset = (index - 8) * 4 in
              emit_load allocation "t0" operand
-             ^ Printf.sprintf "  sw t0, %d(sp)\n" offset)
+             ^ emit_store_word "t0" "sp" offset)
     |> String.concat ""
   in
   let cleanup_stack =
     if stack_arg_bytes = 0 then ""
-    else Printf.sprintf "  addi sp, sp, %d\n" stack_arg_bytes
+    else emit_addi "sp" "sp" stack_arg_bytes
   in
   let save_result =
     match dest with
@@ -153,14 +168,14 @@ let emit_return allocation operand =
   let restore_regs =
     allocation.used_regs
     |> List.mapi (fun index reg ->
-           Printf.sprintf "  lw %s, %d(s0)\n" reg (saved_reg_offset allocation index))
+           emit_load_word reg "s0" (saved_reg_offset allocation index))
     |> String.concat ""
   in
   emit_operand_to_a0 allocation operand
   ^ restore_regs
-  ^ Printf.sprintf "  lw ra, %d(s0)\n" (ra_offset allocation)
-  ^ Printf.sprintf "  lw s0, %d(s0)\n" (s0_offset allocation)
-  ^ Printf.sprintf "  addi sp, sp, %d\n" (frame_size allocation)
+  ^ emit_load_word "ra" "s0" (ra_offset allocation)
+  ^ emit_load_word "s0" "s0" (s0_offset allocation)
+  ^ emit_addi "sp" "sp" (frame_size allocation)
   ^ "  ret\n"
 
 let emit_instr allocation = function
@@ -188,13 +203,13 @@ let emit_func func =
   let save_regs =
     allocation.used_regs
     |> List.mapi (fun index reg ->
-           Printf.sprintf "  sw %s, %d(sp)\n" reg (saved_reg_offset allocation index))
+           emit_store_word reg "sp" (saved_reg_offset allocation index))
     |> String.concat ""
   in
   let prologue =
-    Printf.sprintf "  addi sp, sp, -%d\n" frame_size
-    ^ Printf.sprintf "  sw ra, %d(sp)\n" (ra_offset allocation)
-    ^ Printf.sprintf "  sw s0, %d(sp)\n" (s0_offset allocation)
+    emit_addi "sp" "sp" (-frame_size)
+    ^ emit_store_word "ra" "sp" (ra_offset allocation)
+    ^ emit_store_word "s0" "sp" (s0_offset allocation)
     ^ save_regs
     ^ "  mv s0, sp\n"
   in

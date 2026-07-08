@@ -79,6 +79,66 @@ let expect_compile_exact source expected =
     failwith
       (Printf.sprintf "compile mismatch\nexpected:\n%s\nactual:\n%s" expected actual)
 
+let starts_with prefix text =
+  let prefix_len = String.length prefix in
+  String.length text >= prefix_len && String.sub text 0 prefix_len = prefix
+
+let split_once text ch =
+  match String.index_opt text ch with
+  | None -> (text, "")
+  | Some index ->
+      ( String.sub text 0 index,
+        String.sub text (index + 1) (String.length text - index - 1) )
+
+let parse_operands text =
+  text |> String.split_on_char ',' |> List.map String.trim
+  |> List.filter (fun part -> part <> "")
+
+let memory_offset operand =
+  let offset, _ = split_once operand '(' in
+  int_of_string (String.trim offset)
+
+let expect_real_riscv_immediates source =
+  let assembly = Mytoyc.Driver.compile source in
+  assembly |> String.split_on_char '\n'
+  |> List.iter (fun raw_line ->
+         let line = String.trim raw_line in
+         let fail imm =
+           if imm < -2048 || imm > 2047 then
+             failwith
+               (Printf.sprintf "RISC-V 12-bit immediate out of range: %d in %s"
+                  imm line)
+         in
+         if starts_with "addi " line then
+           match split_once line ' ' |> snd |> parse_operands with
+           | [ _; _; imm ] -> fail (int_of_string imm)
+           | _ -> ()
+         else if starts_with "lw " line || starts_with "sw " line then
+           match split_once line ' ' |> snd |> parse_operands with
+           | [ _; mem ] -> fail (memory_offset mem)
+           | _ -> ())
+
+let many_locals_source count =
+  let decls =
+    List.init count (fun index -> Printf.sprintf "int v%d = %d;" index (index mod 7))
+    |> String.concat " "
+  in
+  let sum =
+    List.init count (fun index -> Printf.sprintf "v%d" index)
+    |> String.concat " + "
+  in
+  Printf.sprintf "int main(){ %s return %s; }" decls sum
+
+let many_args_source count =
+  let params =
+    List.init count (fun index -> Printf.sprintf "int p%d" index)
+    |> String.concat ","
+  in
+  let args =
+    List.init count string_of_int |> String.concat ","
+  in
+  Printf.sprintf "int pick(%s){ return p%d; } int main(){ return pick(%s); }"
+    params (count - 1) args
 let expect_compile_error source expected =
   try
     ignore (Mytoyc.Driver.compile source);
@@ -245,6 +305,8 @@ int main() {
   expect_compile_contains
     "int pick9(int a,int b,int c,int d,int e,int f,int g,int h,int i){ return i; } int main(){ return pick9(1,2,3,4,5,6,7,8,9); }"
     [ "call pick9"; "sw t0, 0(sp)" ];
+  expect_real_riscv_immediates (many_locals_source 700);
+  expect_real_riscv_immediates (many_args_source 540);
   expect_opt_compile_contains "int main(){ return 1 + 2 * 3; }"
     [ "li a0, 7"; "ret" ];
   expect_opt_compile_lacks "int main(){ return 1 + 2 * 3; }"
