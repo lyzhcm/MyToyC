@@ -320,6 +320,9 @@ int main() {
   expect_compile_contains
     "int pick9(int a,int b,int c,int d,int e,int f,int g,int h,int i){ return i; } int main(){ return pick9(1,2,3,4,5,6,7,8,9); }"
     [ "call __mytoyc_pick9"; "sw t0, 0(sp)" ];
+  expect_compile_contains
+    "int main(){ int x = 0; if (x) { if (1) x = 1; else x = 2; } else { if (0) x = 3; else x = 4; } if (x) { if (x > 1) x = x + 1; else x = x + 2; } else { x = 0; } return x; }"
+    [ ".L_main_if_else_"; ".L_main_if_end_"; "ret" ];
   expect_real_riscv_immediates (many_locals_source 530);
   expect_real_riscv_immediates (many_args_source 520);
   expect_opt_compile_contains "int main(){ return 1 + 2 * 3; }"

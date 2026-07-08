@@ -284,12 +284,18 @@ and lower_if env cond then_branch else_branch =
       let else_label, env = fresh_label env "if_else" in
       let end_label, env = fresh_label env "if_end" in
       let then_env, then_code = lower_stmt env then_branch in
-      let else_env, else_code = lower_stmt env else_branch in
+      let else_start_env =
+        { env with next_reg = then_env.next_reg; next_label = then_env.next_label }
+      in
+      let else_env, else_code = lower_stmt else_start_env else_branch in
       let result_env =
-        match static_truth cond with
-        | Some true -> then_env
-        | Some false -> else_env
-        | None -> env
+        let env =
+          match static_truth cond with
+          | Some true -> then_env
+          | Some false -> else_env
+          | None -> env
+        in
+        { env with next_reg = else_env.next_reg; next_label = else_env.next_label }
       in
       ( result_env,
         cond_code
