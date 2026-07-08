@@ -36,7 +36,7 @@ type decl =
 type stmt =
   | Block of stmt list
   | Empty
-  | DeclStmt of decl
+  | DeclStmt of decl list
   | Assign of string * expr
   | ExprStmt of expr
   | If of expr * stmt * stmt option
@@ -58,7 +58,7 @@ type func = {
 }
 
 type program_item =
-  | GlobalDecl of decl
+  | GlobalDecl of decl list
   | FuncDef of func
 
 type program = program_item list

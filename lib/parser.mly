@@ -20,30 +20,39 @@ open Ast
 %%
 
 program:
-  | items = nonempty_list(comp_item); EOF { items }
+  | items = nonempty_list(comp_item); EOF { List.concat items }
 
 comp_item:
-  | d = const_decl { GlobalDecl d }
+  | d = const_decl { [ GlobalDecl d ] }
   | INT; item = int_comp_item { item }
-  | f = void_func { FuncDef f }
+  | f = void_func { [ FuncDef f ] }
 
 int_comp_item:
-  | name = IDENT; ASSIGN; value = expr; SEMICOLON
-    { GlobalDecl (VarDecl (name, Some value)) }
+  | name = IDENT; ASSIGN; value = expr; rest = list(preceded(COMMA, var_def)); SEMICOLON
+    { [ GlobalDecl (VarDecl (name, Some value) :: rest) ] }
+  | name = IDENT; rest = list(preceded(COMMA, var_def)); SEMICOLON
+    { [ GlobalDecl (VarDecl (name, None) :: rest) ] }
   | name = IDENT; LPAREN; params = separated_list(COMMA, param); RPAREN; LBRACE; body = list(stmt); RBRACE
-    { FuncDef { return_type = TInt; name; params; body } }
+    { [ FuncDef { return_type = TInt; name; params; body } ] }
 
 void_func:
   | VOID; name = IDENT; LPAREN; params = separated_list(COMMA, param); RPAREN; LBRACE; body = list(stmt); RBRACE
     { { return_type = TVoid; name; params; body } }
 
 const_decl:
-  | CONST; INT; name = IDENT; ASSIGN; value = expr; SEMICOLON
-    { ConstDecl (name, value) }
+  | CONST; INT; decls = separated_nonempty_list(COMMA, const_def); SEMICOLON
+    { decls }
+
+const_def:
+  | name = IDENT; ASSIGN; value = expr { ConstDecl (name, value) }
+
+var_def:
+  | name = IDENT; ASSIGN; value = expr { VarDecl (name, Some value) }
+  | name = IDENT { VarDecl (name, None) }
 
 decl:
   | d = const_decl { d }
-  | INT; name = IDENT; ASSIGN; value = expr; SEMICOLON { VarDecl (name, Some value) }
+  | INT; decls = separated_nonempty_list(COMMA, var_def); SEMICOLON { decls }
 
 param:
   | INT; name = IDENT { { param_type = TInt; param_name = name } }

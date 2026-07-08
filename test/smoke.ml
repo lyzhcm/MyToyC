@@ -199,10 +199,13 @@ int main() {
   expect_parse "int main(){ return 1 < 2 && 3 != 4; }";
   expect_parse "int main(){ int a = 1; int b = 2; a = a + b; return a; }";
   expect_parse_error "";
-  expect_parse_error "int x;";
-  expect_parse_error "int main(){ int x; return 0; }";
+  expect_parse "int x; int main(){ return x; }";
+  expect_parse "int main(){ int x; return 0; }";
+  expect_parse "int main(){ int a, b = 2, c; return a + b + c; }";
   expect_parse "int g = 1; int main(){ return g; }";
+  expect_parse "int g; int main(){ return g; }";
   expect_parse "const int c = 1; int main(){ return c; }";
+  expect_parse "const int a = 1, b = a + 2; int main(){ return b; }";
   expect_parse "void noop(){ return; } int main(){ return 0; }";
   expect_parse "int main(){ ; return 0; }";
   expect_parse "int main(){ 1 + 2; return 0; }";
@@ -290,6 +293,8 @@ int main() {
   expect_run_result
     "int ret = 5; int add(int a0, int t0){ return a0 + t0 + ret; } int main(){ int a0 = 1; return add(a0, 2); }"
     8;
+  expect_run_result "int main(){ int a, b = 2, c; return a + b + c; }" 2;
+  expect_run_result "const int a = 1, b = a + 2; int main(){ return b; }" 3;
   expect_compile_contains
     "int ret = 5; int add(int a0, int t0){ return a0 + t0 + ret; } int main(){ return add(1, 2); }"
     [ ".globl __mytoyc_ret"; "__mytoyc_ret:"; ".globl __mytoyc_add";
@@ -300,6 +305,9 @@ int main() {
   expect_compile_contains
     "int g = 1; int main(){ return g; }"
     [ ".data"; ".globl __mytoyc_g"; "__mytoyc_g:"; ".word 1"; "la t0, __mytoyc_g"; "ret" ];
+  expect_compile_contains
+    "int g; int main(){ int x; return g + x; }"
+    [ ".data"; ".globl __mytoyc_g"; "__mytoyc_g:"; ".word 0"; "ret" ];
   expect_compile_contains
     "int g = 1; int inc(int x){ return x + 1; } int main(){ g = inc(g); return g; }"
     [ ".data"; "call __mytoyc_inc"; "la t1, __mytoyc_g"; "ret" ];

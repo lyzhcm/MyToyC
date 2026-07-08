@@ -218,7 +218,12 @@ let lower_decl env = function
 let rec lower_stmt env = function
   | Ast.Block body -> lower_block env body
   | Ast.Empty -> (env, [])
-  | Ast.DeclStmt decl -> lower_decl env decl
+  | Ast.DeclStmt decls ->
+      List.fold_left
+        (fun (env, code) decl ->
+          let env, decl_code = lower_decl env decl in
+          (env, code @ decl_code))
+        (env, []) decls
   | Ast.Assign (name, expr) ->
       let env, code, value = lower_expr env expr in
       let store =
@@ -378,8 +383,12 @@ let build_global_env (program : Ast.program) =
   List.fold_left
     (fun globals item ->
       match item with
-      | Ast.GlobalDecl (Ast.ConstDecl (name, _) | Ast.VarDecl (name, _)) ->
-          Symbol.StringMap.add name () globals
+      | Ast.GlobalDecl decls ->
+          List.fold_left
+            (fun globals -> function
+              | Ast.ConstDecl (name, _) | Ast.VarDecl (name, _) ->
+                  Symbol.StringMap.add name () globals)
+            globals decls
       | Ast.FuncDef _ -> globals)
     Symbol.StringMap.empty program
 
@@ -436,24 +445,27 @@ let collect_global_initializers (program : Ast.program) =
     (fun (consts, globals, runtime_decls) item ->
       match item with
       | Ast.FuncDef _ -> (consts, globals, runtime_decls)
-      | Ast.GlobalDecl decl -> (
-          match decl with
-          | Ast.ConstDecl (name, expr) -> (
-              match eval_static_expr consts expr with
-              | Some value ->
-                  ( Symbol.StringMap.add name value consts,
-                    { Ir.name; init = value } :: globals,
-                    runtime_decls )
-              | None ->
-                  (consts, { Ir.name; init = 0 } :: globals, decl :: runtime_decls))
-          | Ast.VarDecl (name, Some expr) -> (
-              match eval_static_expr consts expr with
-              | Some value ->
-                  (consts, { Ir.name; init = value } :: globals, runtime_decls)
-              | None ->
-                  (consts, { Ir.name; init = 0 } :: globals, decl :: runtime_decls))
-          | Ast.VarDecl (name, None) ->
-              (consts, { Ir.name; init = 0 } :: globals, runtime_decls)))
+      | Ast.GlobalDecl decls ->
+          List.fold_left
+            (fun (consts, globals, runtime_decls) decl ->
+              match decl with
+              | Ast.ConstDecl (name, expr) -> (
+                  match eval_static_expr consts expr with
+                  | Some value ->
+                      ( Symbol.StringMap.add name value consts,
+                        { Ir.name; init = value } :: globals,
+                        runtime_decls )
+                  | None ->
+                      (consts, { Ir.name; init = 0 } :: globals, decl :: runtime_decls))
+              | Ast.VarDecl (name, Some expr) -> (
+                  match eval_static_expr consts expr with
+                  | Some value ->
+                      (consts, { Ir.name; init = value } :: globals, runtime_decls)
+                  | None ->
+                      (consts, { Ir.name; init = 0 } :: globals, decl :: runtime_decls))
+              | Ast.VarDecl (name, None) ->
+                  (consts, { Ir.name; init = 0 } :: globals, runtime_decls))
+            (consts, globals, runtime_decls) decls)
     (Symbol.StringMap.empty, [], []) program
   |> fun (_, globals, runtime_decls) -> (List.rev globals, List.rev runtime_decls)
 

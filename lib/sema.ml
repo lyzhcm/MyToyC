@@ -206,7 +206,7 @@ let rec check_stmt return_type env = function
       let block_env = List.fold_left (check_stmt return_type) block_env body in
       leave_scope block_env
   | Ast.Empty -> env
-  | Ast.DeclStmt decl -> check_decl env decl
+  | Ast.DeclStmt decls -> List.fold_left check_decl env decls
   | Ast.Assign (name, value) ->
       let binding = find_binding_exn env name in
       if not binding.mutable_ then
@@ -407,9 +407,13 @@ let collect_program program =
   in
   List.iter
     (function
-      | Ast.GlobalDecl (Ast.ConstDecl (name, _) | Ast.VarDecl (name, _)) ->
-          add_name name;
-          globals := StringSet.add name !globals
+      | Ast.GlobalDecl decls ->
+          List.iter
+            (function
+              | Ast.ConstDecl (name, _) | Ast.VarDecl (name, _) ->
+                  add_name name;
+                  globals := StringSet.add name !globals)
+            decls
       | Ast.FuncDef func ->
           add_name func.name;
           funcs :=
@@ -432,8 +436,13 @@ let check_program (program : Ast.program) =
     List.fold_left
       (fun top_env item ->
         match item with
-        | Ast.GlobalDecl decl ->
-            let declared_globals = check_global_decl top_env decl in
+        | Ast.GlobalDecl decls ->
+            let declared_globals =
+              List.fold_left
+                (fun declared_globals decl ->
+                  check_global_decl { top_env with declared_globals } decl)
+                top_env.declared_globals decls
+            in
             { top_env with declared_globals }
         | Ast.FuncDef func ->
             let self_sig =
