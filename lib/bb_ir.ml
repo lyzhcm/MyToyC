@@ -3,15 +3,21 @@ module StringSet = Set.Make (String)
 
 type label = string
 
+type target = {
+  label : label;
+  args : Ir.operand list;
+}
+
 type terminator =
   | Return of Ir.operand
-  | Jump of label
-  | BranchZero of Ir.operand * label * label option
-  | BranchCmp of Ast.binop * Ir.operand * Ir.operand * label * label option
+  | Jump of target
+  | BranchZero of Ir.operand * target * target option
+  | BranchCmp of Ast.binop * Ir.operand * Ir.operand * target * target option
   | Unreachable
 
 type block = {
   label : label;
+  params : Ir.vreg list;
   instrs : Ir.instr list;
   terminator : terminator;
 }
@@ -29,15 +35,17 @@ let fresh_label name purpose counter =
   incr counter;
   label
 
+let target ?(args = []) label = { label; args }
+
 let terminator_successors = function
   | Return _ | Unreachable -> []
-  | Jump label -> [ label ]
-  | BranchZero (_, zero_label, None) -> [ zero_label ]
-  | BranchZero (_, zero_label, Some nonzero_label) ->
-      [ zero_label; nonzero_label ]
-  | BranchCmp (_, _, _, zero_label, None) -> [ zero_label ]
-  | BranchCmp (_, _, _, zero_label, Some nonzero_label) ->
-      [ zero_label; nonzero_label ]
+  | Jump target -> [ target.label ]
+  | BranchZero (_, zero_target, None) -> [ zero_target.label ]
+  | BranchZero (_, zero_target, Some nonzero_target) ->
+      [ zero_target.label; nonzero_target.label ]
+  | BranchCmp (_, _, _, zero_target, None) -> [ zero_target.label ]
+  | BranchCmp (_, _, _, zero_target, Some nonzero_target) ->
+      [ zero_target.label; nonzero_target.label ]
 
 let operand_uses = function
   | Ir.Imm _ -> []
@@ -45,9 +53,19 @@ let operand_uses = function
 
 let terminator_uses = function
   | Return operand -> operand_uses operand
-  | BranchZero (operand, _, _) -> operand_uses operand
-  | BranchCmp (_, lhs, rhs, _, _) -> operand_uses lhs @ operand_uses rhs
-  | Jump _ | Unreachable -> []
+  | Jump target -> List.concat_map operand_uses target.args
+  | BranchZero (operand, zero_target, nonzero_target) ->
+      operand_uses operand @ List.concat_map operand_uses zero_target.args
+      @ (match nonzero_target with
+        | None -> []
+        | Some target -> List.concat_map operand_uses target.args)
+  | BranchCmp (_, lhs, rhs, zero_target, nonzero_target) ->
+      operand_uses lhs @ operand_uses rhs
+      @ List.concat_map operand_uses zero_target.args
+      @ (match nonzero_target with
+        | None -> []
+        | Some target -> List.concat_map operand_uses target.args)
+  | Unreachable -> []
 
 let is_control = function
   | Ir.Label _ | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ -> true
@@ -80,6 +98,7 @@ let of_ir_func (func : Ir.func) =
     blocks :=
       {
         label = !current_label;
+        params = [];
         instrs = List.rev !current_instrs;
         terminator;
       }
@@ -96,11 +115,11 @@ let of_ir_func (func : Ir.func) =
           blocks = List.rev !blocks;
         }
     | Ir.Label label :: rest ->
-        if has_open_instrs () then emit (Jump label);
+        if has_open_instrs () then emit (Jump (target label));
         start_block label;
         loop rest
     | Ir.Jump label :: rest ->
-        emit (Jump label);
+        emit (Jump (target label));
         start_block (fresh_label func.name "dead" counter);
         loop rest
     | Ir.Return operand :: rest ->
@@ -110,11 +129,11 @@ let of_ir_func (func : Ir.func) =
     | Ir.BranchZero (operand, zero_label) :: rest -> (
         match rest with
         | Ir.Label nonzero_label :: _ ->
-            emit (BranchZero (operand, zero_label, Some nonzero_label));
+            emit (BranchZero (operand, target zero_label, Some (target nonzero_label)));
             start_block (fresh_label func.name "dead" counter);
             loop rest
         | [] ->
-            emit (BranchZero (operand, zero_label, None));
+            emit (BranchZero (operand, target zero_label, None));
             {
               name = func.name;
               entry;
@@ -122,7 +141,7 @@ let of_ir_func (func : Ir.func) =
             }
         | _ ->
             let nonzero_label = fresh_label func.name "fallthrough" counter in
-            emit (BranchZero (operand, zero_label, Some nonzero_label));
+            emit (BranchZero (operand, target zero_label, Some (target nonzero_label)));
             start_block nonzero_label;
             loop rest)
     | instr :: rest ->
@@ -132,16 +151,21 @@ let of_ir_func (func : Ir.func) =
   in
   loop func.body
 
-let terminator_to_instrs = function
+let simple_terminator_to_instrs = function
   | Return operand -> [ Ir.Return operand ]
-  | Jump label -> [ Ir.Jump label ]
-  | BranchZero (operand, zero_label, None) -> [ Ir.BranchZero (operand, zero_label) ]
-  | BranchZero (operand, zero_label, Some nonzero_label) ->
-      [ Ir.BranchZero (operand, zero_label); Ir.Jump nonzero_label ]
+  | Jump target when target.args = [] -> [ Ir.Jump target.label ]
+  | BranchZero (operand, zero_target, None) when zero_target.args = [] ->
+      [ Ir.BranchZero (operand, zero_target.label) ]
+  | BranchZero (operand, zero_target, Some nonzero_target)
+    when zero_target.args = [] && nonzero_target.args = [] ->
+      [ Ir.BranchZero (operand, zero_target.label); Ir.Jump nonzero_target.label ]
   | BranchCmp _ -> Diagnostic.fail "internal error: BranchCmp needs a temporary register"
+  | Jump _ | BranchZero _ ->
+      Diagnostic.fail "internal error: edge arguments need block lowering"
   | Unreachable -> []
 
 let to_ir_func func =
+  let blocks_by_label = block_map func.blocks in
   let max_reg_operand current = function
     | Ir.Imm _ -> current
     | Ir.Reg reg -> max current reg
@@ -168,35 +192,91 @@ let to_ir_func func =
         List.fold_left max_reg_operand current args
     | Ir.Label _ | Ir.Jump _ -> current
   in
+  let max_reg_target current target =
+    List.fold_left max_reg_operand current target.args
+  in
+  let max_reg_target_opt current = function
+    | None -> current
+    | Some target -> max_reg_target current target
+  in
   let max_reg_terminator current = function
-    | Return operand | BranchZero (operand, _, _) ->
+    | Return operand -> max_reg_operand current operand
+    | BranchZero (operand, zero_target, nonzero_target) ->
         max_reg_operand current operand
-    | BranchCmp (_, lhs, rhs, _, _) ->
-        max_reg_operand current lhs |> fun current -> max_reg_operand current rhs
-    | Jump _ | Unreachable -> current
+        |> fun current -> max_reg_target current zero_target
+        |> fun current -> max_reg_target_opt current nonzero_target
+    | BranchCmp (_, lhs, rhs, zero_target, nonzero_target) ->
+        max_reg_operand current lhs
+        |> fun current -> max_reg_operand current rhs
+        |> fun current -> max_reg_target current zero_target
+        |> fun current -> max_reg_target_opt current nonzero_target
+    | Jump target ->
+        List.fold_left max_reg_operand current target.args
+    | Unreachable -> current
   in
   let next_reg =
     func.blocks
     |> List.fold_left
          (fun current block ->
+           let current = List.fold_left max current block.params in
            let current = List.fold_left max_reg_instr current block.instrs in
            max_reg_terminator current block.terminator)
          (-1)
     |> ( + ) 1
     |> ref
   in
+  let next_edge = ref 0 in
   let fresh_reg () =
     let reg = !next_reg in
     incr next_reg;
     reg
   in
-  let terminator_to_instrs = function
+  let fresh_edge_label () = fresh_label func.name "edge" next_edge in
+  let params_for (target : target) =
+    match StringMap.find_opt target.label blocks_by_label with
+    | Some block -> block.params
+    | None -> Diagnostic.fail ("internal error: unknown block target: " ^ target.label)
+  in
+  let lower_target (target : target) =
+    let params = params_for target in
+    if List.length params <> List.length target.args then
+      Diagnostic.fail ("internal error: block argument arity mismatch: " ^ target.label);
+    if target.args = [] then [ Ir.Jump target.label ]
+    else
+      let temps = List.map (fun arg -> (fresh_reg (), arg)) target.args in
+      let save_args = List.map (fun (tmp, arg) -> Ir.Move (tmp, arg)) temps in
+      let load_params =
+        List.map2
+          (fun param (tmp, _) -> Ir.Move (param, Ir.Reg tmp))
+          params temps
+      in
+      save_args @ load_params @ [ Ir.Jump target.label ]
+  in
+  let lower_edge (target : target) =
+    let label = fresh_edge_label () in
+    (label, Ir.Label label :: lower_target target)
+  in
+  let rec terminator_to_instrs = function
     | BranchCmp (op, lhs, rhs, zero_label, nonzero_label) ->
         let tmp = fresh_reg () in
         Ir.Binary (tmp, op, lhs, rhs)
         :: terminator_to_instrs
              (BranchZero (Ir.Reg tmp, zero_label, nonzero_label))
-    | terminator -> terminator_to_instrs terminator
+    | Jump target -> lower_target target
+    | BranchZero (operand, zero_target, None) when zero_target.args = [] ->
+        [ Ir.BranchZero (operand, zero_target.label) ]
+    | BranchZero (operand, zero_target, None) ->
+        let zero_label, zero_code = lower_edge zero_target in
+        [ Ir.BranchZero (operand, zero_label) ] @ zero_code
+    | BranchZero (operand, zero_target, Some nonzero_target)
+      when zero_target.args = [] && nonzero_target.args = [] ->
+        [ Ir.BranchZero (operand, zero_target.label); Ir.Jump nonzero_target.label ]
+    | BranchZero (operand, zero_target, Some nonzero_target) ->
+        let zero_label, zero_code = lower_edge zero_target in
+        [ Ir.BranchZero (operand, zero_label) ]
+        @ lower_target nonzero_target
+        @ zero_code
+    | terminator -> simple_terminator_to_instrs terminator
   in
   let instrs =
     func.blocks

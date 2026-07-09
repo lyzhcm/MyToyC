@@ -109,8 +109,13 @@ let add_terminator_uses uses defs terminator =
        uses
 
 let block_uses_defs block =
+  let param_defs =
+    List.fold_left
+      (fun defs param -> IntSet.add param defs)
+      IntSet.empty block.Bb_ir.params
+  in
   let uses, defs =
-    List.fold_left add_instr_uses_defs (IntSet.empty, IntSet.empty)
+    List.fold_left add_instr_uses_defs (IntSet.empty, param_defs)
       block.Bb_ir.instrs
   in
   (add_terminator_uses uses defs block.Bb_ir.terminator, defs)

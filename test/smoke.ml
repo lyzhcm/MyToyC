@@ -444,7 +444,11 @@ int main() {
   if Array.length block_cfg.Mytoyc.Cfg.blocks <> 3 then
     failwith "basic block split mismatch";
   (match block_cfg.Mytoyc.Cfg.blocks.(0).Mytoyc.Bb_ir.terminator with
-  | BranchZero (Reg 0, ".L_main_else", Some ".L_main_fallthrough_0") -> ()
+  | BranchZero
+      ( Reg 0,
+        { label = ".L_main_else"; args = [] },
+        Some { label = ".L_main_fallthrough_0"; args = [] } ) ->
+      ()
   | _ -> failwith "basic block terminator mismatch");
   if List.length block_cfg.Mytoyc.Cfg.block_succs.(0) <> 2 then
     failwith "basic block cfg successor mismatch";
@@ -466,7 +470,13 @@ int main() {
   in
   let cmp_block_func = Mytoyc.Bb_ir.of_ir_func cmp_func |> Mytoyc.Bb_ir.fuse_branch_cmp in
   (match (List.hd cmp_block_func.Mytoyc.Bb_ir.blocks).Mytoyc.Bb_ir.terminator with
-  | BranchCmp (Lt, Reg 0, Reg 1, ".L_main_false", Some ".L_main_fallthrough_0") -> ()
+  | BranchCmp
+      ( Lt,
+        Reg 0,
+        Reg 1,
+        { label = ".L_main_false"; args = [] },
+        Some { label = ".L_main_fallthrough_0"; args = [] } ) ->
+      ()
   | _ -> failwith "branch compare fusion mismatch");
   if
     cmp_block_func |> Mytoyc.Bb_ir.to_ir_func
@@ -474,6 +484,31 @@ int main() {
     |> Riscv_sim.run <> 1
   then
     failwith "branch compare roundtrip mismatch";
+  let param_block_func =
+    Mytoyc.Bb_ir.
+      {
+        name = "main";
+        entry = ".L_main_entry";
+        blocks =
+          [ { label = ".L_main_entry";
+              params = [];
+              instrs = [];
+              terminator = Jump { label = ".L_main_join"; args = [ Imm 41 ] } };
+            { label = ".L_main_join";
+              params = [ 0 ];
+              instrs = [ Binary (1, Add, Reg 0, Imm 1) ];
+              terminator = Return (Reg 1) } ];
+      }
+  in
+  let param_cfg = Mytoyc.Cfg.of_blocks param_block_func in
+  if not (Mytoyc.Cfg.IntSet.mem 0 param_cfg.Mytoyc.Cfg.block_defs.(1)) then
+    failwith "block parameter defs mismatch";
+  if
+    param_block_func |> Mytoyc.Bb_ir.to_ir_func
+    |> fun func -> Mytoyc.Riscv.emit_program Mytoyc.Ir.{ globals = []; funcs = [ func ] }
+    |> Riscv_sim.run <> 42
+  then
+    failwith "block parameter lowering mismatch";
   expect_optimized_body
     Mytoyc.Ir.
       ( [ Move (0, Imm 1); StoreGlobal ("g", Reg 0); Move (1, Imm 2);
