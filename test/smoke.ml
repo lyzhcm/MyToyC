@@ -324,7 +324,7 @@ int main() {
   expect_compile_contains "int main(){ return -(1 + 2); }"
     [ ".globl main"; "add"; "neg"; "ret" ];
   expect_compile_contains "int main(){ return 1 < 2 && 3 != 4; }"
-    [ ".globl main"; "bge"; "beq"; "ret" ];
+    [ ".globl main"; "slti"; "beq"; "ret" ];
   expect_compile_contains
     "int main(){ int a = 1; int b = 2; a = a + b; return a; }"
     [ ".globl main"; "li "; "add"; "ret" ];
@@ -333,7 +333,7 @@ int main() {
     [ ".L_main_if_else_"; ".L_main_if_end_"; "beqz"; "j .L_main_if_end_" ];
   expect_compile_contains
     "int main(){ int x = 0; while (x < 3) { x = x + 1; if (x == 2) continue; if (x > 2) break; } return x; }"
-    [ ".L_main_while_cond_"; ".L_main_while_end_"; "bge";
+    [ ".L_main_while_cond_"; ".L_main_while_end_"; "slti";
       "bne"; "j .L_main_while_cond_" ];
   expect_compile_contains "int main(){ return 1 && 0 || 2; }"
     [ ".L_main_land_false_"; ".L_main_lor_rhs_"; "beqz";
@@ -375,6 +375,8 @@ int main() {
     "int main(){ int x = 0; if (x) { if (1) x = 1; else x = 2; } else { if (0) x = 3; else x = 4; } if (x) { if (x > 1) x = x + 1; else x = x + 2; } else { x = 0; } return x; }"
     [ ".L_main_if_else_"; ".L_main_if_end_"; "ret" ];
   expect_real_riscv_immediates (many_locals_source 530);
+  expect_run_result (many_locals_source 100) 295;
+  expect_run_result (many_locals_source 400) 1197;
   expect_real_riscv_immediates (many_args_source 520);
   expect_run_result (many_args_source 520) 519;
   expect_run_result (many_args_sum_source 120) (arithmetic_series_sum 120);
@@ -488,7 +490,7 @@ int main() {
     27;
   expect_opt_compile_contains
     "int f(int x){ if (x < 10) return x + 5; return x - 3; } int main(){ return f(1); }"
-    [ "bge"; "ret" ];
+    [ "slti"; "ret" ];
   expect_compile_error "int main(){ return a; }" "undefined variable: a";
   expect_compile_error "int main(){ int a = 0; int a = 1; return a; }"
     "duplicate variable: a";

@@ -127,9 +127,8 @@ let emit_binop allocation dest op lhs rhs =
   let dest_tmp = result_target allocation dest "t2" in
   let store_result code = code ^ emit_store allocation dest_tmp dest in
   let emit_single operand instr =
-    emit_load allocation lhs_tmp operand
-    ^ instr dest_tmp lhs_tmp
-    |> store_result
+    let operand_load, operand_reg = operand_reg allocation lhs_tmp operand in
+    operand_load ^ instr dest_tmp operand_reg |> store_result
   in
   let min_i32 = Int32.to_int Int32.min_int in
   let max_i32 = Int32.to_int Int32.max_int in
@@ -322,19 +321,41 @@ let rec reg_used_later reg = function
   | instr :: rest -> instr_uses_reg reg instr || reg_used_later reg rest
 
 let emit_branch_compare allocation op lhs rhs label =
-  let lhs_load, lhs_reg = operand_reg allocation "t0" lhs in
-  let rhs_load, rhs_reg = operand_reg allocation "t1" rhs in
-  let branch =
-    match op with
-    | Ast.Lt -> Printf.sprintf "  bge %s, %s, %s\n" lhs_reg rhs_reg label
-    | Ast.Gt -> Printf.sprintf "  bge %s, %s, %s\n" rhs_reg lhs_reg label
-    | Ast.Le -> Printf.sprintf "  blt %s, %s, %s\n" rhs_reg lhs_reg label
-    | Ast.Ge -> Printf.sprintf "  blt %s, %s, %s\n" lhs_reg rhs_reg label
-    | Ast.Eq -> Printf.sprintf "  bne %s, %s, %s\n" lhs_reg rhs_reg label
-    | Ast.Ne -> Printf.sprintf "  beq %s, %s, %s\n" lhs_reg rhs_reg label
-    | _ -> ""
+  let emit_slti_branch operand imm branch_op =
+    let load, reg = operand_reg allocation "t0" operand in
+    load
+    ^ Printf.sprintf "  slti t1, %s, %d\n  %s t1, zero, %s\n" reg imm
+        branch_op label
   in
-  lhs_load ^ rhs_load ^ branch
+  match (op, lhs, rhs) with
+  | Ast.Lt, operand, Ir.Imm imm when fits_imm12 imm ->
+      emit_slti_branch operand imm "beq"
+  | Ast.Le, operand, Ir.Imm imm when imm <> Int32.to_int Int32.max_int && fits_imm12 (imm + 1) ->
+      emit_slti_branch operand (imm + 1) "beq"
+  | Ast.Gt, operand, Ir.Imm imm when imm <> Int32.to_int Int32.max_int && fits_imm12 (imm + 1) ->
+      emit_slti_branch operand (imm + 1) "bne"
+  | Ast.Ge, operand, Ir.Imm imm when fits_imm12 imm ->
+      emit_slti_branch operand imm "bne"
+  | Ast.Eq, operand, Ir.Imm 0 | Ast.Eq, Ir.Imm 0, operand ->
+      let load, reg = operand_reg allocation "t0" operand in
+      load ^ Printf.sprintf "  bne %s, zero, %s\n" reg label
+  | Ast.Ne, operand, Ir.Imm 0 | Ast.Ne, Ir.Imm 0, operand ->
+      let load, reg = operand_reg allocation "t0" operand in
+      load ^ Printf.sprintf "  beq %s, zero, %s\n" reg label
+  | _ ->
+      let lhs_load, lhs_reg = operand_reg allocation "t0" lhs in
+      let rhs_load, rhs_reg = operand_reg allocation "t1" rhs in
+      let branch =
+        match op with
+        | Ast.Lt -> Printf.sprintf "  bge %s, %s, %s\n" lhs_reg rhs_reg label
+        | Ast.Gt -> Printf.sprintf "  bge %s, %s, %s\n" rhs_reg lhs_reg label
+        | Ast.Le -> Printf.sprintf "  blt %s, %s, %s\n" rhs_reg lhs_reg label
+        | Ast.Ge -> Printf.sprintf "  blt %s, %s, %s\n" lhs_reg rhs_reg label
+        | Ast.Eq -> Printf.sprintf "  bne %s, %s, %s\n" lhs_reg rhs_reg label
+        | Ast.Ne -> Printf.sprintf "  beq %s, %s, %s\n" lhs_reg rhs_reg label
+        | _ -> ""
+      in
+      lhs_load ^ rhs_load ^ branch
 let emit_instr allocation use_frame = function
   | Ir.LoadParam (dest, index) -> emit_load_param allocation dest index
   | Ir.Move (dest, operand) -> emit_move_instr allocation dest operand
