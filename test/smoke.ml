@@ -30,6 +30,17 @@ let contains_substring text fragment =
   in
   loop 0
 
+let count_substring text fragment =
+  let text_len = String.length text in
+  let fragment_len = String.length fragment in
+  let rec loop index count =
+    if fragment_len = 0 || index + fragment_len > text_len then count
+    else if String.sub text index fragment_len = fragment then
+      loop (index + fragment_len) (count + 1)
+    else loop (index + 1) count
+  in
+  loop 0 0
+
 let expect_lex_error source expected =
   try
     ignore (Mytoyc.Driver.lex_all source);
@@ -72,6 +83,15 @@ let expect_opt_compile_lacks source unexpected =
              "optimized compile output unexpectedly contains %S\noutput:\n%s"
              fragment output))
     unexpected
+
+let expect_opt_compile_count source fragment expected =
+  let output = Mytoyc.Driver.compile ~optimize:true source in
+  let actual = count_substring output fragment in
+  if actual <> expected then
+    failwith
+      (Printf.sprintf
+         "optimized compile count mismatch for %S\nexpected: %d\nactual:   %d\noutput:\n%s"
+         fragment expected actual output)
 
 let expect_compile_exact source expected =
   let actual = Mytoyc.Driver.compile source in
@@ -170,6 +190,14 @@ let expect_run_result source expected =
   if actual <> expected then
     failwith
       (Printf.sprintf "runtime result mismatch\nexpected: %d\nactual:   %d"
+         expected actual)
+
+let expect_opt_run_result source expected =
+  let actual = source |> Mytoyc.Driver.compile ~optimize:true |> Riscv_sim.run in
+  if actual <> expected then
+    failwith
+      (Printf.sprintf
+         "optimized runtime result mismatch\nexpected: %d\nactual:   %d"
          expected actual)
 
 let () =
@@ -388,6 +416,12 @@ int main() {
   expect_opt_compile_lacks
     "int main(){ if (1) return 3; else return 4; }"
     [ "li a0, 4"; "beqz" ];
+  expect_opt_compile_lacks
+    "int main(){ int x = 0; while (0) { x = x + 1; } return x; }"
+    [ ".L_main_while_cond_"; "beqz" ];
+  expect_opt_compile_count
+    "int f(int x,int y){ int a = x + y; if (x) return a + (x + y); return a; } int main(){ return f(2,3); }"
+    "  add " 2;
   expect_opt_compile_contains
     "int add(int a,int b){ return a + b; } int main(){ return add(1, 2); }"
     [ "li a0, 3"; "ret" ];
@@ -403,6 +437,21 @@ int main() {
   expect_opt_compile_lacks
     "int unused(){ return 9; } int main(){ return 1; }"
     [ "__mytoyc_unused" ];
+  expect_opt_compile_contains
+    "int sum(int n,int acc){ if (n <= 0) return acc; return sum(n - 1, acc + n); } int main(){ return sum(5,0); }"
+    [ ".L_sum_tail_loop"; "j .L_sum_tail_loop" ];
+  expect_opt_compile_count
+    "int sum(int n,int acc){ if (n <= 0) return acc; return sum(n - 1, acc + n); } int main(){ return sum(5,0); }"
+    "call __mytoyc_sum" 1;
+  expect_opt_run_result
+    "int sum(int n,int acc){ if (n <= 0) return acc; return sum(n - 1, acc + n); } int main(){ return sum(5,0); }"
+    15;
+  expect_opt_compile_contains
+    "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
+    [ "add s1, s1, s2\n.L_f_while_cond_" ];
+  expect_opt_run_result
+    "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
+    27;
   expect_opt_compile_contains
     "int f(int x){ if (x < 10) return x + 5; return x - 3; } int main(){ return f(1); }"
     [ "bge"; "ret" ];

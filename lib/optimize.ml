@@ -389,6 +389,430 @@ let eliminate_dead_defs body =
   in
   fix body
 
+type lattice =
+  | LUnknown
+  | LConst of int
+  | LOverdef
+
+let lattice_equal lhs rhs =
+  match (lhs, rhs) with
+  | LUnknown, LUnknown | LOverdef, LOverdef -> true
+  | LConst lhs, LConst rhs -> lhs = rhs
+  | _ -> false
+
+let merge_lattice lhs rhs =
+  match (lhs, rhs) with
+  | LUnknown, value | value, LUnknown -> value
+  | LConst lhs, LConst rhs when lhs = rhs -> LConst lhs
+  | _ -> LOverdef
+
+let get_lattice reg env =
+  IntMap.find_opt reg env |> Option.value ~default:LUnknown
+
+let set_lattice reg value env =
+  IntMap.add reg value env
+
+let merge_env lhs rhs =
+  IntMap.merge
+    (fun _ lhs rhs ->
+      match (lhs, rhs) with
+      | None, None -> None
+      | Some value, None | None, Some value -> Some value
+      | Some lhs, Some rhs -> Some (merge_lattice lhs rhs))
+    lhs rhs
+
+let env_equal lhs rhs =
+  IntMap.equal lattice_equal lhs rhs
+
+let const_operand env = function
+  | Ir.Imm value -> LConst value
+  | Ir.Reg reg -> get_lattice reg env
+
+let rewrite_const_operand env = function
+  | Ir.Imm _ as imm -> imm
+  | Ir.Reg reg -> (
+      match get_lattice reg env with
+      | LConst value -> Ir.Imm value
+      | LUnknown | LOverdef -> Ir.Reg reg)
+
+let const_unop op operand =
+  match operand with
+  | LConst value -> LConst (apply_unop op value)
+  | LUnknown -> LUnknown
+  | LOverdef -> LOverdef
+
+let const_binop op lhs rhs =
+  match (lhs, rhs) with
+  | LConst lhs, LConst rhs -> (
+      match apply_binop op lhs rhs with
+      | Some value -> LConst value
+      | None -> LOverdef)
+  | LOverdef, _ | _, LOverdef -> LOverdef
+  | LUnknown, _ | _, LUnknown -> LUnknown
+
+let define_const dest value env =
+  set_lattice dest value env
+
+let transfer_const env instr =
+  match instr with
+  | Ir.LoadParam (dest, _) | Ir.LoadGlobal (dest, _) ->
+      define_const dest LOverdef env
+  | Ir.Move (dest, operand) ->
+      define_const dest (const_operand env operand) env
+  | Ir.Unary (dest, op, operand) ->
+      define_const dest (const_unop op (const_operand env operand)) env
+  | Ir.Binary (dest, op, lhs, rhs) ->
+      define_const dest
+        (const_binop op (const_operand env lhs) (const_operand env rhs))
+        env
+  | Ir.ShiftLeft (dest, operand, amount) -> (
+      match const_operand env operand with
+      | LConst value ->
+          define_const dest
+            (LConst Int32.(to_int (shift_left (of_int value) amount)))
+            env
+      | LUnknown -> define_const dest LUnknown env
+      | LOverdef -> define_const dest LOverdef env)
+  | Ir.Call (dest, _, _) -> (
+      match dest with
+      | None -> env
+      | Some dest -> define_const dest LOverdef env)
+  | Ir.Label _ | Ir.StoreGlobal _ | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ ->
+      env
+
+let effective_succs env cfg index =
+  match cfg.Cfg.instrs.(index) with
+  | Ir.BranchZero (operand, _) -> (
+      match rewrite_const_operand env operand with
+      | Ir.Imm 0 -> [ List.hd cfg.Cfg.succs.(index) ]
+      | Ir.Imm _ -> (
+          match cfg.Cfg.succs.(index) with
+          | _target :: fallthrough :: _ -> [ fallthrough ]
+          | [] | [ _ ] -> [])
+      | Ir.Reg _ -> cfg.Cfg.succs.(index))
+  | _ -> cfg.Cfg.succs.(index)
+
+let constant_dataflow body =
+  let cfg = Cfg.of_instrs body in
+  let count = Array.length cfg.Cfg.instrs in
+  let in_envs = Array.make count IntMap.empty in
+  let out_envs = Array.make count IntMap.empty in
+  let reachable = Array.make count false in
+  let changed = ref true in
+  if count > 0 then reachable.(0) <- true;
+  while !changed do
+    changed := false;
+    for index = 0 to count - 1 do
+      if reachable.(index) then (
+        let in_env =
+          List.fold_left
+            (fun env pred ->
+              if reachable.(pred) then merge_env env out_envs.(pred) else env)
+            IntMap.empty cfg.Cfg.preds.(index)
+        in
+        if not (env_equal in_env in_envs.(index)) then (
+          in_envs.(index) <- in_env;
+          changed := true);
+        let out_env = transfer_const in_env cfg.Cfg.instrs.(index) in
+        if not (env_equal out_env out_envs.(index)) then (
+          out_envs.(index) <- out_env;
+          changed := true);
+        List.iter
+          (fun succ ->
+            if not reachable.(succ) then (
+              reachable.(succ) <- true;
+              changed := true))
+          (effective_succs out_env cfg index))
+    done
+  done;
+  (cfg, in_envs, out_envs, reachable)
+
+let rewrite_with_constants body =
+  let cfg, in_envs, out_envs, reachable = constant_dataflow body in
+  let label_map =
+    Array.fold_left
+      (fun (index, labels) instr ->
+        match instr with
+        | Ir.Label label -> (index + 1, StringMap.add label index labels)
+        | _ -> (index + 1, labels))
+      (0, StringMap.empty) cfg.Cfg.instrs
+    |> snd
+  in
+  cfg.Cfg.instrs
+  |> Array.to_list
+  |> List.mapi (fun index instr -> (index, instr))
+  |> List.filter_map (fun (index, instr) ->
+         if not reachable.(index) then None
+         else
+           let env = in_envs.(index) in
+           let out_env = out_envs.(index) in
+           match instr with
+           | Ir.Move (dest, operand) ->
+               Some (Ir.Move (dest, rewrite_const_operand env operand))
+           | Ir.Unary (dest, op, operand) -> (
+               let operand = rewrite_const_operand env operand in
+               match const_unop op (const_operand env operand) with
+               | LConst value -> Some (Ir.Move (dest, Ir.Imm value))
+               | LUnknown | LOverdef -> Some (Ir.Unary (dest, op, operand)))
+           | Ir.Binary (dest, op, lhs, rhs) -> (
+               let lhs = rewrite_const_operand env lhs in
+               let rhs = rewrite_const_operand env rhs in
+               match const_binop op (const_operand env lhs) (const_operand env rhs) with
+               | LConst value -> Some (Ir.Move (dest, Ir.Imm value))
+               | LUnknown | LOverdef -> Some (Ir.Binary (dest, op, lhs, rhs)))
+           | Ir.ShiftLeft (dest, operand, amount) -> (
+               let operand = rewrite_const_operand env operand in
+               match operand with
+               | Ir.Imm value ->
+                   Some
+                     (Ir.Move
+                        ( dest,
+                          Ir.Imm Int32.(to_int (shift_left (of_int value) amount)) ))
+               | Ir.Reg _ -> Some (Ir.ShiftLeft (dest, operand, amount)))
+           | Ir.StoreGlobal (name, operand) ->
+               Some (Ir.StoreGlobal (name, rewrite_const_operand env operand))
+           | Ir.Call (dest, name, args) ->
+               Some (Ir.Call (dest, name, List.map (rewrite_const_operand env) args))
+           | Ir.BranchZero (operand, label) -> (
+               match rewrite_const_operand env operand with
+               | Ir.Imm 0 -> Some (Ir.Jump label)
+               | Ir.Imm _ -> None
+               | operand -> Some (Ir.BranchZero (operand, label)))
+           | Ir.Return operand ->
+               Some (Ir.Return (rewrite_const_operand env operand))
+           | Ir.Jump label -> (
+               match StringMap.find_opt label label_map with
+               | Some target when not reachable.(target) -> None
+               | _ -> Some instr)
+           | Ir.LoadParam (dest, index) -> (
+               match get_lattice dest out_env with
+               | LConst value -> Some (Ir.Move (dest, Ir.Imm value))
+               | LUnknown | LOverdef -> Some (Ir.LoadParam (dest, index)))
+           | Ir.LoadGlobal _ | Ir.Label _ -> Some instr)
+
+let intersect_exprs lhs rhs =
+  ExprMap.merge
+    (fun _ lhs rhs ->
+      match (lhs, rhs) with
+      | Some lhs, Some rhs when lhs = rhs -> Some lhs
+      | _ -> None)
+    lhs rhs
+
+let exprs_equal lhs rhs =
+  ExprMap.equal Int.equal lhs rhs
+
+let instr_dest = function
+  | Ir.LoadParam (dest, _) | Ir.Move (dest, _) | Ir.Unary (dest, _, _)
+  | Ir.Binary (dest, _, _, _) | Ir.ShiftLeft (dest, _, _)
+  | Ir.LoadGlobal (dest, _) ->
+      Some dest
+  | Ir.Call (dest, _, _) -> dest
+  | Ir.Label _ | Ir.StoreGlobal _ | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ ->
+      None
+
+let transfer_exprs exprs instr =
+  let exprs =
+    match instr_dest instr with
+    | None -> exprs
+    | Some dest -> kill_exprs dest exprs
+  in
+  match expr_of_instr instr with
+  | Some expr -> (
+      match instr_dest instr with
+      | Some dest when not (expr_depends_on dest expr) -> ExprMap.add expr dest exprs
+      | _ -> exprs)
+  | None -> exprs
+
+let global_cse body =
+  let cfg = Cfg.of_instrs body in
+  let count = Array.length cfg.Cfg.instrs in
+  let in_exprs = Array.make count ExprMap.empty in
+  let out_exprs = Array.make count ExprMap.empty in
+  let reachable = reachable_indices body in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    for index = 0 to count - 1 do
+      if reachable.(index) then (
+        let pred_exprs =
+          cfg.Cfg.preds.(index)
+          |> List.filter (fun pred -> reachable.(pred))
+          |> List.map (fun pred -> out_exprs.(pred))
+        in
+        let in_expr =
+          match pred_exprs with
+          | [] -> ExprMap.empty
+          | first :: rest -> List.fold_left intersect_exprs first rest
+        in
+        if not (exprs_equal in_expr in_exprs.(index)) then (
+          in_exprs.(index) <- in_expr;
+          changed := true);
+        let out_expr = transfer_exprs in_expr cfg.Cfg.instrs.(index) in
+        if not (exprs_equal out_expr out_exprs.(index)) then (
+          out_exprs.(index) <- out_expr;
+          changed := true))
+    done
+  done;
+  cfg.Cfg.instrs
+  |> Array.to_list
+  |> List.mapi (fun index instr -> (index, instr))
+  |> List.filter_map (fun (index, instr) ->
+         if not reachable.(index) then None
+         else
+           match expr_of_instr instr with
+           | Some expr -> (
+               match (instr_dest instr, ExprMap.find_opt expr in_exprs.(index)) with
+               | Some dest, Some source when source <> dest ->
+                   Some (Ir.Move (dest, Ir.Reg source))
+               | _ -> Some instr)
+           | None -> Some instr)
+
+let set_of_list values =
+  List.fold_left (fun set value -> IntSet.add value set) IntSet.empty values
+
+let all_indices count =
+  List.init count (fun index -> index) |> set_of_list
+
+let intersect_sets = function
+  | [] -> IntSet.empty
+  | first :: rest -> List.fold_left IntSet.inter first rest
+
+let dominators cfg =
+  let count = Array.length cfg.Cfg.instrs in
+  let doms = Array.make count IntSet.empty in
+  if count > 0 then (
+    let all = all_indices count in
+    for index = 0 to count - 1 do
+      doms.(index) <- if index = 0 then IntSet.singleton 0 else all
+    done;
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      for index = 1 to count - 1 do
+        let pred_doms = List.map (fun pred -> doms.(pred)) cfg.Cfg.preds.(index) in
+        let next = IntSet.add index (intersect_sets pred_doms) in
+        if not (IntSet.equal next doms.(index)) then (
+          doms.(index) <- next;
+          changed := true)
+      done
+    done);
+  doms
+
+let dominates doms dominator node =
+  IntSet.mem dominator doms.(node)
+
+let natural_loop cfg header latch =
+  let rec visit seen = function
+    | [] -> seen
+    | node :: rest ->
+        if IntSet.mem node seen then visit seen rest
+        else visit (IntSet.add node seen) (cfg.Cfg.preds.(node) @ rest)
+  in
+  visit (IntSet.singleton header) [ latch ]
+
+let loop_defs cfg nodes =
+  IntSet.fold
+    (fun node defs -> IntSet.union defs cfg.Cfg.defs.(node))
+    nodes IntSet.empty
+
+let pure_hoistable_instr = function
+  | Ir.Move _ | Ir.Unary _ | Ir.ShiftLeft _ -> true
+  | Ir.Binary (_, (Ast.Div | Ast.Mod), _, _) -> false
+  | Ir.Binary _ -> true
+  | Ir.LoadParam _ | Ir.LoadGlobal _ | Ir.StoreGlobal _ | Ir.Call _ | Ir.Label _
+  | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ ->
+      false
+
+let instr_operands = function
+  | Ir.Move (_, operand) | Ir.Unary (_, _, operand)
+  | Ir.ShiftLeft (_, operand, _) ->
+      [ operand ]
+  | Ir.Binary (_, _, lhs, rhs) -> [ lhs; rhs ]
+  | Ir.Call (_, _, args) -> args
+  | Ir.StoreGlobal (_, operand) | Ir.BranchZero (operand, _) | Ir.Return operand ->
+      [ operand ]
+  | Ir.LoadParam _ | Ir.LoadGlobal _ | Ir.Label _ | Ir.Jump _ -> []
+
+let operand_invariant defs invariant_defs = function
+  | Ir.Imm _ -> true
+  | Ir.Reg reg -> (not (IntSet.mem reg defs)) || IntSet.mem reg invariant_defs
+
+let definition_counts body =
+  List.fold_left
+    (fun counts instr ->
+      match instr_dest instr with
+      | None -> counts
+      | Some dest ->
+          let count = IntMap.find_opt dest counts |> Option.value ~default:0 in
+          IntMap.add dest (count + 1) counts)
+    IntMap.empty body
+
+let single_definition counts reg =
+  IntMap.find_opt reg counts |> Option.value ~default:0 = 1
+
+let licm_once body =
+  let cfg = Cfg.of_instrs body in
+  let count = Array.length cfg.Cfg.instrs in
+  let doms = dominators cfg in
+  let def_counts = definition_counts body in
+  let backedges =
+    List.init count (fun index ->
+        cfg.Cfg.succs.(index)
+        |> List.filter_map (fun succ ->
+               if dominates doms succ index then Some (succ, index) else None))
+    |> List.concat
+  in
+  let try_loop (header, latch) =
+    let nodes = natural_loop cfg header latch in
+    let defs = loop_defs cfg nodes in
+    let invariant_defs = ref IntSet.empty in
+    let hoisted = ref [] in
+    let hoisted_indices = ref IntSet.empty in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      for index = 0 to count - 1 do
+        if IntSet.mem index nodes && not (IntSet.mem index !hoisted_indices) then
+          let instr = cfg.Cfg.instrs.(index) in
+          match instr_dest instr with
+          | Some dest
+            when pure_hoistable_instr instr
+                 && single_definition def_counts dest
+                 && List.for_all (operand_invariant defs !invariant_defs)
+                      (instr_operands instr) ->
+              hoisted := (index, instr) :: !hoisted;
+              hoisted_indices := IntSet.add index !hoisted_indices;
+              invariant_defs := IntSet.add dest !invariant_defs;
+              changed := true
+          | _ -> ()
+      done
+    done;
+    if !hoisted = [] then None
+    else
+      let hoisted =
+        !hoisted |> List.sort (fun (lhs, _) (rhs, _) -> compare lhs rhs) |> List.map snd
+      in
+      Some (header, !hoisted_indices, hoisted)
+  in
+  match List.find_map try_loop backedges with
+  | None -> body
+  | Some (header, hoisted_indices, hoisted) ->
+      cfg.Cfg.instrs
+      |> Array.to_list
+      |> List.mapi (fun index instr -> (index, instr))
+      |> List.filter_map (fun (index, instr) ->
+             if IntSet.mem index hoisted_indices then None
+             else if index = header then Some (hoisted @ [ instr ])
+             else Some [ instr ])
+      |> List.concat
+
+let licm body =
+  let rec fix body =
+    let next = licm_once body in
+    if next = body then body else fix next
+  in
+  fix body
+
 let cleanup_control_flow body =
   body
   |> remove_redundant_jumps
@@ -401,7 +825,10 @@ let optimize_body body =
     let next =
       body
       |> optimize_instrs
+      |> rewrite_with_constants
       |> cleanup_control_flow
+      |> global_cse
+      |> licm
       |> eliminate_dead_defs
       |> cleanup_control_flow
     in
