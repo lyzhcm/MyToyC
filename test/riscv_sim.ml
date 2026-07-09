@@ -10,6 +10,7 @@ type instr =
   | Sub of string * string * string
   | Mul of string * string * string
   | Slli of string * string * int
+  | Slti of string * string * int
   | Div of string * string * string
   | Rem of string * string * string
   | Slt of string * string * string
@@ -79,6 +80,7 @@ let parse_instruction line =
   | "sub", [ rd; rs1; rs2 ] -> Sub (rd, rs1, rs2)
   | "mul", [ rd; rs1; rs2 ] -> Mul (rd, rs1, rs2)
   | "slli", [ rd; rs; amount ] -> Slli (rd, rs, parse_int amount)
+  | "slti", [ rd; rs; imm ] -> Slti (rd, rs, parse_int imm)
   | "div", [ rd; rs1; rs2 ] -> Div (rd, rs1, rs2)
   | "rem", [ rd; rs1; rs2 ] -> Rem (rd, rs1, rs2)
   | "slt", [ rd; rs1; rs2 ] -> Slt (rd, rs1, rs2)
@@ -229,6 +231,9 @@ let run ?(max_steps = 1000000) assembly =
         advance ()
     | Slli (rd, rs, amount) ->
         set_reg regs rd (Int64.shift_left (get_reg regs rs) amount);
+        advance ()
+    | Slti (rd, rs, imm) ->
+        set_reg regs rd (if get_reg regs rs < Int64.of_int imm then 1L else 0L);
         advance ()
     | Div (rd, rs1, rs2) ->
         binop regs rd rs1 rs2 Int64.div;

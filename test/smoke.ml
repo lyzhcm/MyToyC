@@ -79,26 +79,9 @@ let expect_compile_exact source expected =
     failwith
       (Printf.sprintf "compile mismatch\nexpected:\n%s\nactual:\n%s" expected actual)
 
-let optimized_func_body source name =
-  let program =
-    source
-    |> Mytoyc.Driver.parse
-    |> Mytoyc.Sema.check_program
-    |> Mytoyc.Irgen.lower_program
-    |> Mytoyc.Optimize.run ~enabled:true
-  in
-  match
-    List.find_opt
-      (fun (func : Mytoyc.Ir.func) -> func.Mytoyc.Ir.name = name)
-      program.Mytoyc.Ir.funcs
-  with
-  | Some func -> func.Mytoyc.Ir.body
-  | None -> failwith (Printf.sprintf "optimized function not found: %s" name)
-
-let expect_optimized_func_body source name expected =
-  let actual = optimized_func_body source name in
-  if actual <> expected then
-    failwith (Printf.sprintf "optimized IR mismatch for function %s" name)
+let expect_optimized_body body expected =
+  let actual = Mytoyc.Optimize.optimize_body body in
+  if actual <> expected then failwith "optimized IR body mismatch"
 
 let starts_with prefix text =
   let prefix_len = String.length prefix in
@@ -367,22 +350,46 @@ int main() {
   expect_opt_compile_contains
     "int main(){ int x = 3; int y = x; return y + 4; }"
     [ "li a0, 7"; "ret" ];
-  expect_optimized_func_body
-    "int f(int x){ int y = x; return y; } int main(){ return f(1); }"
-    "f"
+  expect_optimized_body
+    Mytoyc.Ir.( [ LoadParam (0, 0); Move (1, Reg 0); Return (Reg 1) ] )
     Mytoyc.Ir.( [ LoadParam (0, 0); Return (Reg 0) ] );
+  expect_optimized_body
+    Mytoyc.Ir.
+      ( [ LoadParam (0, 0); LoadParam (1, 1); Binary (2, Add, Reg 0, Reg 1);
+          Binary (3, Add, Reg 0, Reg 1); Return (Reg 3) ] )
+    Mytoyc.Ir.
+      ( [ LoadParam (0, 0); LoadParam (1, 1); Binary (2, Add, Reg 0, Reg 1);
+          Return (Reg 2) ] );
   expect_opt_compile_contains
     "int main(){ int x = 5; return x * 8; }"
     [ "li a0, 40"; "ret" ];
   expect_opt_compile_contains
-    "int f(int x){ return x * 8; } int main(){ return f(5); }"
+    "int f(int x){ if (x) return x * 8; return 0; } int main(){ return f(5); }"
     [ "slli"; "ret" ];
   expect_opt_compile_lacks
-    "int f(int x){ return x * 8; } int main(){ return f(5); }"
+    "int f(int x){ if (x) return x * 8; return 0; } int main(){ return f(5); }"
     [ "  mul " ];
   expect_opt_compile_lacks
     "int main(){ if (1) return 3; else return 4; }"
     [ "li a0, 4"; "beqz" ];
+  expect_opt_compile_contains
+    "int add(int a,int b){ return a + b; } int main(){ return add(1, 2); }"
+    [ "li a0, 3"; "ret" ];
+  expect_opt_compile_lacks
+    "int add(int a,int b){ return a + b; } int main(){ return add(1, 2); }"
+    [ "call __mytoyc_add"; "__mytoyc_add:" ];
+  expect_opt_compile_contains
+    "int f(int x){ return x + 1; } int g(int y){ return f(y) * 2; } int main(){ return g(3); }"
+    [ "li a0, 8"; "ret" ];
+  expect_opt_compile_lacks
+    "int f(int x){ return x + 1; } int g(int y){ return f(y) * 2; } int main(){ return g(3); }"
+    [ "call __mytoyc_f"; "call __mytoyc_g"; "__mytoyc_f:"; "__mytoyc_g:" ];
+  expect_opt_compile_lacks
+    "int unused(){ return 9; } int main(){ return 1; }"
+    [ "__mytoyc_unused" ];
+  expect_opt_compile_contains
+    "int f(int x){ if (x < 10) return x + 5; return x - 3; } int main(){ return f(1); }"
+    [ "slti"; "ret" ];
   expect_compile_error "int main(){ return a; }" "undefined variable: a";
   expect_compile_error "int main(){ int a = 0; int a = 1; return a; }"
     "duplicate variable: a";

@@ -62,6 +62,43 @@ let emit_binop allocation dest op lhs rhs =
   let lhs_tmp = "t0" in
   let rhs_tmp = "t1" in
   let dest_tmp = result_target allocation dest "t2" in
+  let store_result code = code ^ emit_store allocation dest_tmp dest in
+  let emit_single operand instr =
+    emit_load allocation lhs_tmp operand
+    ^ instr dest_tmp lhs_tmp
+    |> store_result
+  in
+  let min_i32 = Int32.to_int Int32.min_int in
+  let max_i32 = Int32.to_int Int32.max_int in
+  match (op, lhs, rhs) with
+  | Ast.Add, operand, Ir.Imm imm | Ast.Add, Ir.Imm imm, operand ->
+      emit_single operand (fun target source -> emit_addi target source imm)
+  | Ast.Sub, operand, Ir.Imm imm when imm <> min_i32 ->
+      emit_single operand (fun target source -> emit_addi target source (-imm))
+  | Ast.Sub, Ir.Imm 0, operand ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  neg %s, %s\n" target source)
+  | Ast.Eq, operand, Ir.Imm 0 | Ast.Eq, Ir.Imm 0, operand ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  seqz %s, %s\n" target source)
+  | Ast.Ne, operand, Ir.Imm 0 | Ast.Ne, Ir.Imm 0, operand ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  snez %s, %s\n" target source)
+  | Ast.Lt, operand, Ir.Imm imm when fits_imm12 imm ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  slti %s, %s, %d\n" target source imm)
+  | Ast.Ge, operand, Ir.Imm imm when fits_imm12 imm ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  slti %s, %s, %d\n  xori %s, %s, 1\n" target
+            source imm target target)
+  | Ast.Le, operand, Ir.Imm imm when imm <> max_i32 && fits_imm12 (imm + 1) ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  slti %s, %s, %d\n" target source (imm + 1))
+  | Ast.Gt, operand, Ir.Imm imm when imm <> max_i32 && fits_imm12 (imm + 1) ->
+      emit_single operand (fun target source ->
+          Printf.sprintf "  slti %s, %s, %d\n  xori %s, %s, 1\n" target
+            source (imm + 1) target target)
+  | _ ->
   let load = emit_load allocation lhs_tmp lhs ^ emit_load allocation rhs_tmp rhs in
   let instr =
     match op with
