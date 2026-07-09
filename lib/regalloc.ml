@@ -91,6 +91,83 @@ let build_graph func =
   let graph = !graph in
   (cfg, liveness, graph)
 
+let set_of_list values =
+  List.fold_left (fun set value -> IntSet.add value set) IntSet.empty values
+
+let all_indices count =
+  List.init count (fun index -> index) |> set_of_list
+
+let intersect_sets = function
+  | [] -> IntSet.empty
+  | first :: rest -> List.fold_left IntSet.inter first rest
+
+let dominators (cfg : Cfg.t) =
+  let count = Array.length cfg.instrs in
+  let doms = Array.make count IntSet.empty in
+  if count > 0 then (
+    let all = all_indices count in
+    for index = 0 to count - 1 do
+      doms.(index) <- if index = 0 then IntSet.singleton 0 else all
+    done;
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      for index = 1 to count - 1 do
+        let pred_doms = List.map (fun pred -> doms.(pred)) cfg.preds.(index) in
+        let next = IntSet.add index (intersect_sets pred_doms) in
+        if not (IntSet.equal next doms.(index)) then (
+          doms.(index) <- next;
+          changed := true)
+      done
+    done);
+  doms
+
+let dominates doms dominator node =
+  IntSet.mem dominator doms.(node)
+
+let natural_loop cfg header latch =
+  let rec visit seen = function
+    | [] -> seen
+    | node :: rest ->
+        if IntSet.mem node seen then visit seen rest
+        else visit (IntSet.add node seen) (cfg.Cfg.preds.(node) @ rest)
+  in
+  visit (IntSet.singleton header) [ latch ]
+
+let loop_depths (cfg : Cfg.t) =
+  let count = Array.length cfg.instrs in
+  let depths = Array.make count 0 in
+  let doms = dominators cfg in
+  for index = 0 to count - 1 do
+    List.iter
+      (fun succ ->
+        if dominates doms succ index then
+          natural_loop cfg succ index
+          |> IntSet.iter (fun node -> depths.(node) <- depths.(node) + 1))
+      cfg.succs.(index)
+  done;
+  depths
+
+let instr_uses_defs instr =
+  let uses, defs = Cfg.instr_uses_defs instr in
+  IntSet.union uses defs
+
+let add_weight reg amount weights =
+  let current = IntMap.find_opt reg weights |> Option.value ~default:0 in
+  IntMap.add reg (current + amount) weights
+
+let reg_weights (cfg : Cfg.t) =
+  let depths = loop_depths cfg in
+  Array.fold_left
+    (fun (index, weights) instr ->
+      let amount = 1 + (10 * depths.(index)) in
+      let regs = instr_uses_defs instr in
+      ( index + 1,
+        IntSet.fold (fun reg weights -> add_weight reg amount weights) regs weights
+      ))
+    (0, IntMap.empty) cfg.instrs
+  |> snd
+
 let choose_location regs preferences used_phys spill_slot reg neighbors allocation =
   let unavailable =
     IntSet.fold
@@ -120,13 +197,19 @@ let choose_location regs preferences used_phys spill_slot reg neighbors allocati
 
 let allocate func =
   let regs = allocatable_regs func in
-  let _, _, graph = build_graph func in
+  let cfg, _, graph = build_graph func in
   let preferences = move_preferences func.Ir.body in
+  let weights = reg_weights cfg in
+  let weight reg = IntMap.find_opt reg weights |> Option.value ~default:0 in
   let nodes =
     graph
     |> IntMap.bindings
-    |> List.sort (fun (_, lhs) (_, rhs) ->
-           compare (IntSet.cardinal rhs) (IntSet.cardinal lhs))
+    |> List.sort (fun (lhs_reg, lhs_neighbors) (rhs_reg, rhs_neighbors) ->
+           let weight_order = compare (weight rhs_reg) (weight lhs_reg) in
+           if weight_order <> 0 then weight_order
+           else
+             compare (IntSet.cardinal rhs_neighbors)
+               (IntSet.cardinal lhs_neighbors))
   in
   let locations, used_phys, stack_slots =
     List.fold_left

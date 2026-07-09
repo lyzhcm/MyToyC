@@ -616,7 +616,7 @@ int main() {
     15;
   expect_opt_compile_contains
     "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
-    [ "add s1, s1, s2\n.L_f_while_cond_" ];
+    [ "add s2, t5, s2\n.L_f_while_cond_" ];
   expect_opt_run_result
     "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
     27;
