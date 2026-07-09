@@ -430,6 +430,50 @@ int main() {
   expect_optimized_body
     Mytoyc.Ir.( [ LoadParam (0, 0); Binary (1, Add, Reg 0, Reg 0); Return (Reg 1) ] )
     Mytoyc.Ir.( [ LoadParam (0, 0); ShiftLeft (1, Reg 0, 1); Return (Reg 1) ] );
+  let branch_func =
+    Mytoyc.Ir.
+      {
+        name = "main";
+        body =
+          [ LoadParam (0, 0); BranchZero (Reg 0, ".L_main_else"); Return (Imm 1);
+            Label ".L_main_else"; Return (Imm 2) ];
+      }
+  in
+  let block_func = Mytoyc.Bb_ir.of_ir_func branch_func in
+  let block_cfg = Mytoyc.Cfg.of_blocks block_func in
+  if Array.length block_cfg.Mytoyc.Cfg.blocks <> 3 then
+    failwith "basic block split mismatch";
+  (match block_cfg.Mytoyc.Cfg.blocks.(0).Mytoyc.Bb_ir.terminator with
+  | BranchZero (Reg 0, ".L_main_else", Some ".L_main_fallthrough_0") -> ()
+  | _ -> failwith "basic block terminator mismatch");
+  if List.length block_cfg.Mytoyc.Cfg.block_succs.(0) <> 2 then
+    failwith "basic block cfg successor mismatch";
+  let roundtrip = Mytoyc.Bb_ir.to_ir_func block_func in
+  if
+    Mytoyc.Riscv.emit_program Mytoyc.Ir.{ globals = []; funcs = [ roundtrip ] }
+    |> Riscv_sim.run <> 2
+  then
+    failwith "basic block roundtrip mismatch";
+  let cmp_func =
+    Mytoyc.Ir.
+      {
+        name = "main";
+        body =
+          [ Move (0, Imm 1); Move (1, Imm 2); Binary (2, Lt, Reg 0, Reg 1);
+            BranchZero (Reg 2, ".L_main_false"); Return (Imm 1);
+            Label ".L_main_false"; Return (Imm 0) ];
+      }
+  in
+  let cmp_block_func = Mytoyc.Bb_ir.of_ir_func cmp_func |> Mytoyc.Bb_ir.fuse_branch_cmp in
+  (match (List.hd cmp_block_func.Mytoyc.Bb_ir.blocks).Mytoyc.Bb_ir.terminator with
+  | BranchCmp (Lt, Reg 0, Reg 1, ".L_main_false", Some ".L_main_fallthrough_0") -> ()
+  | _ -> failwith "branch compare fusion mismatch");
+  if
+    cmp_block_func |> Mytoyc.Bb_ir.to_ir_func
+    |> fun func -> Mytoyc.Riscv.emit_program Mytoyc.Ir.{ globals = []; funcs = [ func ] }
+    |> Riscv_sim.run <> 1
+  then
+    failwith "branch compare roundtrip mismatch";
   expect_optimized_body
     Mytoyc.Ir.
       ( [ Move (0, Imm 1); StoreGlobal ("g", Reg 0); Move (1, Imm 2);

@@ -11,6 +11,15 @@ type t = {
   defs : IntSet.t array;
 }
 
+type block_t = {
+  blocks : Bb_ir.block array;
+  entry : block_id;
+  block_succs : block_id list array;
+  block_preds : block_id list array;
+  block_uses : IntSet.t array;
+  block_defs : IntSet.t array;
+}
+
 let operand_uses = function
   | Ir.Imm _ -> IntSet.empty
   | Ir.Reg reg -> IntSet.singleton reg
@@ -70,6 +79,42 @@ let build_preds succs =
     succs;
   preds
 
+let build_block_label_map blocks =
+  Array.fold_left
+    (fun (index, labels) block ->
+      (index + 1, StringMap.add block.Bb_ir.label index labels))
+    (0, StringMap.empty) blocks
+  |> snd
+
+let lookup_label label_map label =
+  match StringMap.find_opt label label_map with
+  | Some index -> index
+  | None -> Diagnostic.fail ("internal error: unknown block label: " ^ label)
+
+let block_successors label_map block =
+  block.Bb_ir.terminator
+  |> Bb_ir.terminator_successors
+  |> List.map (lookup_label label_map)
+
+let add_instr_uses_defs (uses, defs) instr =
+  let instr_uses, instr_defs = instr_uses_defs instr in
+  (IntSet.union uses (IntSet.diff instr_uses defs), IntSet.union defs instr_defs)
+
+let add_terminator_uses uses defs terminator =
+  terminator
+  |> Bb_ir.terminator_uses
+  |> List.fold_left
+       (fun uses reg ->
+         if IntSet.mem reg defs then uses else IntSet.add reg uses)
+       uses
+
+let block_uses_defs block =
+  let uses, defs =
+    List.fold_left add_instr_uses_defs (IntSet.empty, IntSet.empty)
+      block.Bb_ir.instrs
+  in
+  (add_terminator_uses uses defs block.Bb_ir.terminator, defs)
+
 let of_instrs instrs =
   let instrs = Array.of_list instrs in
   let label_map = build_label_map instrs in
@@ -85,3 +130,24 @@ let of_instrs instrs =
       instrs ([], [])
   in
   { instrs; succs; preds; uses = Array.of_list uses; defs = Array.of_list defs }
+
+let of_blocks func =
+  let blocks = Array.of_list func.Bb_ir.blocks in
+  let label_map = build_block_label_map blocks in
+  let succs = Array.map (block_successors label_map) blocks in
+  let preds = build_preds succs in
+  let uses, defs =
+    Array.fold_right
+      (fun block (uses, defs) ->
+        let uses_, defs_ = block_uses_defs block in
+        (uses_ :: uses, defs_ :: defs))
+      blocks ([], [])
+  in
+  {
+    blocks;
+    entry = lookup_label label_map func.Bb_ir.entry;
+    block_succs = succs;
+    block_preds = preds;
+    block_uses = Array.of_list uses;
+    block_defs = Array.of_list defs;
+  }

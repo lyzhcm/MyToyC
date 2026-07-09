@@ -9,6 +9,7 @@
   symbol
   sema
   ir
+  bb_ir
   irgen
   cfg
   optimize
