@@ -580,7 +580,57 @@ let remove_unreachable_funcs funcs =
   let reachable = visit StringSet.empty [ "main" ] in
   List.filter (fun (func : Ir.func) -> StringSet.mem func.Ir.name reachable) funcs
 
+let split_params body =
+  let rec loop params = function
+    | Ir.LoadParam (dest, index) :: rest -> loop ((index, dest) :: params) rest
+    | rest -> (List.sort compare params, rest)
+  in
+  loop [] body
+
+let tail_loop_label name = ".L_" ^ name ^ "_tail_loop"
+
+let rewrite_tail_recursion (func : Ir.func) =
+  let params, rest = split_params func.Ir.body in
+  if params = [] then func
+  else
+    let max_reg = max_reg_body func.Ir.body in
+    let next_reg = ref (max_reg + 1) in
+    let fresh () =
+      let reg = !next_reg in
+      incr next_reg;
+      reg
+    in
+    let label = tail_loop_label func.Ir.name in
+    let param_dests = List.map snd params in
+    let rewrite_call args =
+      if List.length args <> List.length param_dests then None
+      else
+        let temps = List.map (fun operand -> (fresh (), operand)) args in
+        let save_args = List.map (fun (tmp, operand) -> Ir.Move (tmp, operand)) temps in
+        let load_params =
+          List.map2
+            (fun param (tmp, _) -> Ir.Move (param, Ir.Reg tmp))
+            param_dests temps
+        in
+        Some (save_args @ load_params @ [ Ir.Jump label ])
+    in
+    let rec rewrite acc = function
+      | Ir.Call (Some ret, name, args) :: Ir.Return (Ir.Reg result) :: rest
+        when name = func.Ir.name && ret = result -> (
+          match rewrite_call args with
+          | Some instrs -> rewrite (List.rev_append instrs acc) rest
+          | None -> rewrite (Ir.Return (Ir.Reg result) :: Ir.Call (Some ret, name, args) :: acc) rest)
+      | Ir.Call (None, name, args) :: Ir.Return operand :: rest when name = func.Ir.name -> (
+          match rewrite_call args with
+          | Some instrs -> rewrite (List.rev_append instrs acc) rest
+          | None -> rewrite (Ir.Return operand :: Ir.Call (None, name, args) :: acc) rest)
+      | instr :: rest -> rewrite (instr :: acc) rest
+      | [] -> List.rev acc
+    in
+    let rewritten = rewrite [] rest in
+    { func with Ir.body = List.map (fun (index, dest) -> Ir.LoadParam (dest, index)) params @ [ Ir.Label label ] @ rewritten }
 let optimize_func func =
+  let func = rewrite_tail_recursion func in
   { func with Ir.body = optimize_body func.Ir.body }
 
 let run ~enabled (program : Ir.program) =

@@ -5,6 +5,7 @@ let slot_offset slot = slot * 4
 
 let asm_symbol name =
   if name = "main" then name else "__mytoyc_" ^ name
+
 let fits_imm12 value = value >= -2048 && value <= 2047
 
 let emit_addi rd rs imm =
@@ -158,11 +159,12 @@ let emit_unop allocation dest op operand =
     | Ast.LNot -> Printf.sprintf "  seqz %s, %s\n" tmp src
   in
   load ^ instr ^ emit_store allocation tmp dest
+
 let emit_shift_left allocation dest operand amount =
-  let operand_tmp = "t0" in
+  let operand_load, operand_reg = operand_reg allocation "t0" operand in
   let dest_tmp = result_target allocation dest "t1" in
-  emit_load allocation operand_tmp operand
-  ^ Printf.sprintf "  slli %s, %s, %d\n" dest_tmp operand_tmp amount
+  operand_load
+  ^ Printf.sprintf "  slli %s, %s, %d\n" dest_tmp operand_reg amount
   ^ emit_store allocation dest_tmp dest
 
 let emit_load_param allocation dest index =
@@ -191,9 +193,10 @@ let emit_load_global allocation dest name =
   ^ emit_store allocation target dest
 
 let emit_store_global allocation name operand =
+  let operand_load, operand_reg = operand_reg allocation "t0" operand in
   emit_global_address "t1" name
-  ^ emit_load allocation "t0" operand
-  ^ "  sw t0, 0(t1)\n"
+  ^ operand_load
+  ^ Printf.sprintf "  sw %s, 0(t1)\n" operand_reg
 
 let emit_call allocation dest name args =
   let stack_arg_count = max 0 (List.length args - 8) in
@@ -239,10 +242,13 @@ let emit_return allocation operand =
   ^ emit_addi "sp" "sp" (frame_size allocation)
   ^ "  ret\n"
 
+let emit_move_instr allocation dest operand =
+  match Regalloc.location allocation dest with
+  | Regalloc.Phys phys -> emit_load allocation phys operand
+  | Regalloc.Stack _ -> emit_load allocation "t0" operand ^ emit_store allocation "t0" dest
 let emit_instr allocation = function
   | Ir.LoadParam (dest, index) -> emit_load_param allocation dest index
-  | Ir.Move (dest, operand) ->
-      emit_load allocation "t0" operand ^ emit_store allocation "t0" dest
+  | Ir.Move (dest, operand) -> emit_move_instr allocation dest operand
   | Ir.Unary (dest, op, operand) -> emit_unop allocation dest op operand
   | Ir.Binary (dest, op, lhs, rhs) -> emit_binop allocation dest op lhs rhs
   | Ir.ShiftLeft (dest, operand, amount) ->
@@ -252,7 +258,8 @@ let emit_instr allocation = function
   | Ir.Call (dest, name, args) -> emit_call allocation dest name args
   | Ir.Label label -> Printf.sprintf "%s:\n" label
   | Ir.BranchZero (operand, label) ->
-      emit_load allocation "t0" operand ^ Printf.sprintf "  beqz t0, %s\n" label
+      let operand_load, operand_reg = operand_reg allocation "t0" operand in
+      operand_load ^ Printf.sprintf "  beqz %s, %s\n" operand_reg label
   | Ir.Jump label -> Printf.sprintf "  j %s\n" label
   | Ir.Return operand -> emit_return allocation operand
 

@@ -280,7 +280,7 @@ int main() {
     [ ".globl main"; "slt"; "snez"; "beqz"; "ret" ];
   expect_compile_contains
     "int main(){ int a = 1; int b = 2; a = a + b; return a; }"
-    [ ".globl main"; "li t0, 1"; "li t0, 2"; "add"; "ret" ];
+    [ ".globl main"; "li "; "add"; "ret" ];
   expect_compile_contains
     "int main(){ if (1) return 1; else return 0; }"
     [ ".L_main_if_else_"; ".L_main_if_end_"; "beqz"; "j .L_main_if_end_" ];
@@ -329,6 +329,12 @@ int main() {
     [ ".L_main_if_else_"; ".L_main_if_end_"; "ret" ];
   expect_real_riscv_immediates (many_locals_source 530);
   expect_real_riscv_immediates (many_args_source 520);
+  expect_run_result
+    "int sum(int n, int acc){ if (n == 0) return acc; return sum(n - 1, acc + n); } int main(){ return sum(10, 0); }"
+    55;
+  expect_opt_compile_contains
+    "int sum(int n, int acc){ if (n == 0) return acc; return sum(n - 1, acc + n); } int main(){ return sum(10, 0); }"
+    [ ".L_sum_tail_loop"; "j .L_sum_tail_loop" ];
   expect_opt_compile_contains "int main(){ int x = 7; return x * 1 + 0; }"
     [ "li a0, 7"; "ret" ];
   expect_opt_compile_lacks "int main(){ int x = 7; return x * 1 + 0; }"
