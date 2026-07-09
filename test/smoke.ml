@@ -509,6 +509,59 @@ int main() {
     |> Riscv_sim.run <> 42
   then
     failwith "block parameter lowering mismatch";
+  let ssa_join_func =
+    Mytoyc.Ir.
+      {
+        name = "main";
+        body =
+          [ Move (0, Imm 0); BranchZero (Reg 0, ".L_main_else");
+            Move (1, Imm 1); Jump ".L_main_join"; Label ".L_main_else";
+            Move (1, Imm 2); Label ".L_main_join"; Return (Reg 1) ];
+      }
+  in
+  let ssa_join_block_func =
+    ssa_join_func |> Mytoyc.Bb_ir.of_ir_func |> Mytoyc.Bb_ir.add_livein_params
+  in
+  let join_block =
+    List.find
+      (fun block -> block.Mytoyc.Bb_ir.label = ".L_main_join")
+      ssa_join_block_func.Mytoyc.Bb_ir.blocks
+  in
+  if List.length join_block.Mytoyc.Bb_ir.params <> 1 then
+    failwith "ssa join block parameter mismatch";
+  if
+    ssa_join_block_func |> Mytoyc.Bb_ir.to_ir_func
+    |> fun func -> Mytoyc.Riscv.emit_program Mytoyc.Ir.{ globals = []; funcs = [ func ] }
+    |> Riscv_sim.run <> 2
+  then
+    failwith "ssa join lowering mismatch";
+  let ssa_loop_func =
+    Mytoyc.Ir.
+      {
+        name = "main";
+        body =
+          [ Move (0, Imm 0); Label ".L_main_cond";
+            Binary (1, Lt, Reg 0, Imm 3); BranchZero (Reg 1, ".L_main_end");
+            Binary (0, Add, Reg 0, Imm 1); Jump ".L_main_cond";
+            Label ".L_main_end"; Return (Reg 0) ];
+      }
+  in
+  let ssa_loop_block_func =
+    ssa_loop_func |> Mytoyc.Bb_ir.of_ir_func |> Mytoyc.Bb_ir.add_livein_params
+  in
+  let cond_block =
+    List.find
+      (fun block -> block.Mytoyc.Bb_ir.label = ".L_main_cond")
+      ssa_loop_block_func.Mytoyc.Bb_ir.blocks
+  in
+  if List.length cond_block.Mytoyc.Bb_ir.params <> 1 then
+    failwith "ssa loop block parameter mismatch";
+  if
+    ssa_loop_block_func |> Mytoyc.Bb_ir.to_ir_func
+    |> fun func -> Mytoyc.Riscv.emit_program Mytoyc.Ir.{ globals = []; funcs = [ func ] }
+    |> Riscv_sim.run <> 3
+  then
+    failwith "ssa loop lowering mismatch";
   expect_optimized_body
     Mytoyc.Ir.
       ( [ Move (0, Imm 1); StoreGlobal ("g", Reg 0); Move (1, Imm 2);
