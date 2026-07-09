@@ -25,18 +25,95 @@ let emit_store_word source base offset =
 let emit_move target source =
   if target = source then "" else Printf.sprintf "  mv %s, %s\n" target source
 
-let save_area_size (allocation : Regalloc.allocation) =
-  (List.length allocation.used_regs * 4) + 8
+let is_power_of_two value =
+  value > 0 && value land (value - 1) = 0
 
-let frame_size (allocation : Regalloc.allocation) =
-  align_to 16 ((allocation.stack_slots * 4) + save_area_size allocation)
+let log2 value =
+  let rec loop shift value =
+    if value = 1 then shift else loop (shift + 1) (value lsr 1)
+  in
+  loop 0 value
 
-let saved_reg_offset (allocation : Regalloc.allocation) index =
-  frame_size allocation - 12 - (index * 4)
+let bit_positions value =
+  let rec loop bit value acc =
+    if value = 0 then List.rev acc
+    else
+      let acc = if value land 1 = 1 then bit :: acc else acc in
+      loop (bit + 1) (value lsr 1) acc
+  in
+  loop 0 value []
 
-let ra_offset (allocation : Regalloc.allocation) = frame_size allocation - 4
+let emit_shifted_term target source shift =
+  if shift = 0 then emit_move target source
+  else Printf.sprintf "  slli %s, %s, %d\n" target source shift
 
-let s0_offset (allocation : Regalloc.allocation) = frame_size allocation - 8
+let strength_reduced_positive_mul target source imm =
+  if is_power_of_two imm && log2 imm < 32 then
+    Some (Printf.sprintf "  slli %s, %s, %d\n" target source (log2 imm))
+  else
+    let rec try_shift shift =
+      if shift >= 31 then None
+      else
+        let power = 1 lsl shift in
+        if imm = power + 1 then
+          let shifted = if target = source then "t1" else target in
+          Some
+            (Printf.sprintf "  slli %s, %s, %d\n  add %s, %s, %s\n" shifted
+               source shift target shifted source)
+        else if imm = power - 1 then
+          let shifted = if target = source then "t1" else target in
+          Some
+            (Printf.sprintf "  slli %s, %s, %d\n  sub %s, %s, %s\n" shifted
+               source shift target shifted source)
+        else try_shift (shift + 1)
+    in
+    match try_shift 1 with
+    | Some _ as code -> code
+    | None -> (
+        match bit_positions imm with
+        | [ first; second ] when second < 31 ->
+            if target = source then
+              Some
+                (emit_shifted_term "t1" source first
+                ^ emit_shifted_term "t2" source second
+                ^ Printf.sprintf "  add %s, t1, t2\n" target)
+            else
+              Some
+                (emit_shifted_term target source first
+                ^ emit_shifted_term "t1" source second
+                ^ Printf.sprintf "  add %s, %s, t1\n" target target)
+        | _ -> None)
+
+let strength_reduced_mul target source imm =
+  match imm with
+  | 0 -> Some (Printf.sprintf "  li %s, 0\n" target)
+  | 1 -> Some (emit_move target source)
+  | -1 -> Some (Printf.sprintf "  neg %s, %s\n" target source)
+  | imm when imm > 0 -> strength_reduced_positive_mul target source imm
+  | imm when imm <> Int32.to_int Int32.min_int -> (
+      match strength_reduced_positive_mul target source (-imm) with
+      | Some code -> Some (code ^ Printf.sprintf "  neg %s, %s\n" target target)
+      | None -> None)
+  | _ -> None
+
+let save_area_size (allocation : Regalloc.allocation) use_frame_pointer =
+  (List.length allocation.used_regs * 4) + 4
+  + if use_frame_pointer then 4 else 0
+
+let frame_size (allocation : Regalloc.allocation) use_frame_pointer =
+  align_to 16
+    ((allocation.stack_slots * 4) + save_area_size allocation use_frame_pointer)
+
+let saved_reg_offset (allocation : Regalloc.allocation) use_frame_pointer index =
+  frame_size allocation use_frame_pointer
+  - (if use_frame_pointer then 12 else 8)
+  - (index * 4)
+
+let ra_offset (allocation : Regalloc.allocation) use_frame_pointer =
+  frame_size allocation use_frame_pointer - 4
+
+let s0_offset (allocation : Regalloc.allocation) use_frame_pointer =
+  frame_size allocation use_frame_pointer - 8
 
 let emit_load allocation target = function
   | Ir.Imm value -> Printf.sprintf "  li %s, %d\n" target value
@@ -81,9 +158,27 @@ let parse_memory_instr opcode line =
     let mem = String.trim mem in
     if reg = "" || mem = "" then None else Some (reg, mem)
 
+let parse_move_instr line =
+  let prefix = "  mv " in
+  if not (starts_with prefix line) then None
+  else
+    let rest =
+      String.sub line (String.length prefix)
+        (String.length line - String.length prefix)
+    in
+    let dest, source = split_once rest ',' in
+    let dest = String.trim dest in
+    let source = String.trim source in
+    if dest = "" || source = "" then None else Some (dest, source)
+
 let peephole_lines lines =
   let rec loop acc = function
     | line :: next :: rest -> (
+        match (parse_move_instr line, parse_move_instr next) with
+        | Some (dest, source), Some (next_dest, next_source)
+          when dest = next_source && source = next_dest ->
+            loop (line :: acc) rest
+        | _ -> (
         match (parse_memory_instr "sw" line, parse_memory_instr "lw" next) with
         | Some (source, store_mem), Some (target, load_mem)
           when store_mem = load_mem ->
@@ -97,7 +192,7 @@ let peephole_lines lines =
             | Some (target, load_mem), Some (source, store_mem)
               when target = source && load_mem = store_mem ->
                 loop (line :: acc) rest
-            | _ -> loop (line :: acc) (next :: rest)))
+            | _ -> loop (line :: acc) (next :: rest))))
     | line :: rest -> loop (line :: acc) rest
     | [] -> List.rev acc
   in
@@ -160,6 +255,16 @@ let emit_binop allocation dest op lhs rhs =
       emit_single operand (fun target source ->
           Printf.sprintf "  slti %s, %s, %d\n  xori %s, %s, 1\n" target
             source (imm + 1) target target)
+  | Ast.Mul, operand, Ir.Imm imm | Ast.Mul, Ir.Imm imm, operand -> (
+      let operand_load, operand_reg = operand_reg allocation lhs_tmp operand in
+      match strength_reduced_mul dest_tmp operand_reg imm with
+      | Some code -> operand_load ^ code |> store_result
+      | None ->
+          let rhs_load = Printf.sprintf "  li %s, %d\n" rhs_tmp imm in
+          operand_load
+          ^ rhs_load
+          ^ Printf.sprintf "  mul %s, %s, %s\n" dest_tmp operand_reg rhs_tmp
+          |> store_result)
   | Ast.LAnd, _, _ | Ast.LOr, _, _ ->
       let load = emit_load allocation lhs_tmp lhs ^ emit_load allocation rhs_tmp rhs in
       let instr =
@@ -220,18 +325,18 @@ let emit_shift_left allocation dest operand amount =
   ^ Printf.sprintf "  slli %s, %s, %d\n" dest_tmp operand_reg amount
   ^ emit_store allocation dest_tmp dest
 
-let emit_load_param allocation dest index =
+let emit_load_param allocation use_frame_pointer dest index =
   let target =
     match Regalloc.location allocation dest with
     | Regalloc.Phys phys -> phys
     | Regalloc.Stack _ -> "t0"
   in
   if index < 8 then
-    Printf.sprintf "  mv %s, a%d\n%s" target index
-      (emit_store allocation target dest)
+    emit_move target (Printf.sprintf "a%d" index) ^ emit_store allocation target dest
   else
-    let offset = frame_size allocation + ((index - 8) * 4) in
-    emit_load_word target "s0" offset ^ emit_store allocation target dest
+    let offset = frame_size allocation use_frame_pointer + ((index - 8) * 4) in
+    let base = if use_frame_pointer then "s0" else "sp" in
+    emit_load_word target base offset ^ emit_store allocation target dest
 
 let emit_global_address tmp name =
   Printf.sprintf "  la %s, %s\n" tmp (asm_symbol name)
@@ -281,21 +386,35 @@ let emit_call allocation dest name args =
   setup_stack ^ setup_args ^ Printf.sprintf "  call %s\n" (asm_symbol name) ^ cleanup_stack
   ^ save_result
 
-let emit_return allocation use_frame operand =
+let emit_epilogue allocation use_frame_pointer =
+  let frame_base = if use_frame_pointer then "s0" else "sp" in
+  let restore_regs =
+    allocation.used_regs
+    |> List.mapi (fun index reg ->
+           emit_load_word reg frame_base
+             (saved_reg_offset allocation use_frame_pointer index))
+    |> String.concat ""
+  in
+  let restore_s0 =
+    if use_frame_pointer then
+      emit_load_word "s0" "s0" (s0_offset allocation use_frame_pointer)
+    else ""
+  in
+  restore_regs
+  ^ emit_load_word "ra" frame_base (ra_offset allocation use_frame_pointer)
+  ^ restore_s0
+  ^ emit_addi "sp" "sp" (frame_size allocation use_frame_pointer)
+  ^ "  ret\n"
+
+let emit_return_a0 allocation use_frame use_frame_pointer =
+  if not use_frame then "  ret\n"
+  else emit_epilogue allocation use_frame_pointer
+
+let emit_return allocation use_frame use_frame_pointer operand =
   if not use_frame then emit_operand_to_a0 allocation operand ^ "  ret\n"
   else
-    let restore_regs =
-      allocation.used_regs
-      |> List.mapi (fun index reg ->
-             emit_load_word reg "s0" (saved_reg_offset allocation index))
-      |> String.concat ""
-    in
     emit_operand_to_a0 allocation operand
-    ^ restore_regs
-    ^ emit_load_word "ra" "s0" (ra_offset allocation)
-    ^ emit_load_word "s0" "s0" (s0_offset allocation)
-    ^ emit_addi "sp" "sp" (frame_size allocation)
-    ^ "  ret\n"
+    ^ emit_epilogue allocation use_frame_pointer
 
 let emit_move_instr allocation dest operand =
   match Regalloc.location allocation dest with
@@ -356,8 +475,9 @@ let emit_branch_compare allocation op lhs rhs label =
         | _ -> ""
       in
       lhs_load ^ rhs_load ^ branch
-let emit_instr allocation use_frame = function
-  | Ir.LoadParam (dest, index) -> emit_load_param allocation dest index
+let emit_instr allocation use_frame use_frame_pointer = function
+  | Ir.LoadParam (dest, index) ->
+      emit_load_param allocation use_frame_pointer dest index
   | Ir.Move (dest, operand) -> emit_move_instr allocation dest operand
   | Ir.Unary (dest, op, operand) -> emit_unop allocation dest op operand
   | Ir.Binary (dest, op, lhs, rhs) -> emit_binop allocation dest op lhs rhs
@@ -371,12 +491,19 @@ let emit_instr allocation use_frame = function
       let operand_load, operand_reg = operand_reg allocation "t0" operand in
       operand_load ^ Printf.sprintf "  beqz %s, %s\n" operand_reg label
   | Ir.Jump label -> Printf.sprintf "  j %s\n" label
-  | Ir.Return operand -> emit_return allocation use_frame operand
+  | Ir.Return operand -> emit_return allocation use_frame use_frame_pointer operand
 
-let emit_instrs allocation use_frame body =
+let emit_instrs allocation use_frame use_frame_pointer body =
   let rec loop acc = function
     | Ir.LoadParam (dest, _) :: rest when not (reg_used_later dest rest) ->
         loop acc rest
+    | Ir.Call (Some dest, name, args) :: Ir.Return (Ir.Reg result) :: rest
+      when dest = result ->
+        loop
+          ( (emit_call allocation None name args
+            ^ emit_return_a0 allocation use_frame use_frame_pointer)
+            :: acc )
+          rest
     | Ir.Binary (dest, op, lhs, rhs) :: Ir.BranchZero (Ir.Reg reg, label) :: rest
       when dest = reg
            && not (reg_used_later reg rest)
@@ -384,7 +511,8 @@ let emit_instrs allocation use_frame body =
               | Ast.Lt | Ast.Gt | Ast.Le | Ast.Ge | Ast.Eq | Ast.Ne -> true
               | _ -> false) ->
         loop (emit_branch_compare allocation op lhs rhs label :: acc) rest
-    | instr :: rest -> loop (emit_instr allocation use_frame instr :: acc) rest
+    | instr :: rest ->
+        loop (emit_instr allocation use_frame use_frame_pointer instr :: acc) rest
     | [] -> String.concat "" (List.rev acc)
   in
   loop [] body
@@ -413,27 +541,37 @@ let can_omit_frame func allocation =
   && max_param_index func.Ir.body < 8
   && not (has_call func.Ir.body)
 
+let need_frame_pointer func allocation =
+  allocation.Regalloc.stack_slots > 0 || max_param_index func.Ir.body >= 8
+
 let emit_func func =
   let allocation = Regalloc.allocate func in
   let use_frame = not (can_omit_frame func allocation) in
+  let use_frame_pointer = use_frame && need_frame_pointer func allocation in
   let prologue =
     if not use_frame then ""
     else
-      let frame_size = frame_size allocation in
+      let frame_size = frame_size allocation use_frame_pointer in
       let save_regs =
         allocation.used_regs
         |> List.mapi (fun index reg ->
-               emit_store_word reg "sp" (saved_reg_offset allocation index))
+               emit_store_word reg "sp"
+                 (saved_reg_offset allocation use_frame_pointer index))
         |> String.concat ""
       in
+      let save_s0 =
+        if use_frame_pointer then
+          emit_store_word "s0" "sp" (s0_offset allocation use_frame_pointer)
+          ^ "  mv s0, sp\n"
+        else ""
+      in
       emit_addi "sp" "sp" (-frame_size)
-      ^ emit_store_word "ra" "sp" (ra_offset allocation)
-      ^ emit_store_word "s0" "sp" (s0_offset allocation)
+      ^ emit_store_word "ra" "sp" (ra_offset allocation use_frame_pointer)
       ^ save_regs
-      ^ "  mv s0, sp\n"
+      ^ save_s0
   in
   Printf.sprintf ".globl %s\n%s:\n%s%s" (asm_symbol func.Ir.name) (asm_symbol func.name) prologue
-    (emit_instrs allocation use_frame func.body)
+    (emit_instrs allocation use_frame use_frame_pointer func.body)
   |> peephole_asm
 
 let emit_program (program : Ir.program) =

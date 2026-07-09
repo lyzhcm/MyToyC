@@ -864,6 +864,65 @@ let licm body =
   in
   fix body
 
+let loop_has_side_effect cfg nodes =
+  IntSet.exists
+    (fun node ->
+      match cfg.Cfg.instrs.(node) with
+      | Ir.StoreGlobal _ | Ir.Call _ | Ir.Return _ -> true
+      | _ -> false)
+    nodes
+
+let loop_exits cfg nodes =
+  IntSet.fold
+    (fun node exits ->
+      cfg.Cfg.succs.(node)
+      |> List.fold_left
+           (fun exits succ ->
+             if IntSet.mem succ nodes then exits else IntSet.add succ exits)
+           exits)
+    nodes IntSet.empty
+
+let eliminate_dead_loop_once body =
+  let cfg = Cfg.of_instrs body in
+  let count = Array.length cfg.Cfg.instrs in
+  let doms = dominators cfg in
+  let liveness = Liveness.analyze cfg in
+  let backedges =
+    List.init count (fun index ->
+        cfg.Cfg.succs.(index)
+        |> List.filter_map (fun succ ->
+               if dominates doms succ index then Some (succ, index) else None))
+    |> List.concat
+  in
+  let dead_loop (header, latch) =
+    let nodes = natural_loop cfg header latch in
+    let defs = loop_defs cfg nodes in
+    let exits = loop_exits cfg nodes in
+    (not (loop_has_side_effect cfg nodes))
+    &&
+    (IntSet.is_empty exits
+    || IntSet.for_all
+         (fun exit ->
+           IntSet.is_empty (IntSet.inter defs liveness.Liveness.live_in.(exit)))
+         exits)
+  in
+  match List.find_map (fun edge -> if dead_loop edge then Some edge else None) backedges with
+  | None -> body
+  | Some (header, latch) ->
+      let nodes = natural_loop cfg header latch in
+      cfg.Cfg.instrs
+      |> Array.to_list
+      |> List.mapi (fun index instr -> (index, instr))
+      |> List.filter_map (fun (index, instr) ->
+             if IntSet.mem index nodes then None else Some instr)
+
+let eliminate_dead_loops body =
+  let rec fix body =
+    let next = eliminate_dead_loop_once body in
+    if next = body then body else fix next
+  in
+  fix body
+
 let cleanup_control_flow body =
   body
   |> remove_redundant_jumps
@@ -880,6 +939,7 @@ let optimize_body body =
       |> cleanup_control_flow
       |> global_cse
       |> licm
+      |> eliminate_dead_loops
       |> eliminate_dead_defs
       |> eliminate_dead_stores
       |> cleanup_control_flow
@@ -930,7 +990,7 @@ let inline_cost body =
 
 let inline_candidate (func : Ir.func) =
   func.Ir.name <> "main"
-  && inline_cost func.Ir.body <= 8
+  && inline_cost func.Ir.body <= 20
   && not (List.exists inline_blocker func.Ir.body)
 
 let build_inline_candidates funcs =

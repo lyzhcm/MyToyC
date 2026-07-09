@@ -62,6 +62,16 @@ let expect_compile_contains source expected =
              output))
     expected
 
+let expect_compile_lacks source unexpected =
+  let output = Mytoyc.Driver.compile source in
+  List.iter
+    (fun fragment ->
+      if contains_substring output fragment then
+        failwith
+          (Printf.sprintf "compile output unexpectedly contains %S\noutput:\n%s"
+             fragment output))
+    unexpected
+
 let expect_opt_compile_contains source expected =
   let output = Mytoyc.Driver.compile ~optimize:true source in
   List.iter
@@ -320,7 +330,7 @@ int main() {
   expect_compile_exact "int main(){ return 42; }"
     ".text\n.globl main\nmain:\n  li a0, 42\n  ret\n";
   expect_compile_contains "int main(){ return 1 + 2 * 3; }"
-    [ ".globl main"; "mul"; "add"; "ret" ];
+    [ ".globl main"; "slli"; "add"; "ret" ];
   expect_compile_contains "int main(){ return -(1 + 2); }"
     [ ".globl main"; "add"; "neg"; "ret" ];
   expect_compile_contains "int main(){ return 1 < 2 && 3 != 4; }"
@@ -341,6 +351,12 @@ int main() {
   expect_compile_contains
     "int id(int x){ return x; } int main(){ return id(1); }"
     [ ".globl __mytoyc_id"; "call __mytoyc_id"; "ret" ];
+  expect_compile_lacks
+    "int id(int x){ return x; } int main(){ return id(1); }"
+    [ "sw s0"; "lw s0"; "mv t3, a0" ];
+  expect_compile_contains
+    "int add(int a,int b){ return a + b; } int main(){ return add(1,2); }"
+    [ "__mytoyc_add:\n  add a0, a0, a1\n  ret" ];
   expect_compile_contains
     "int g(int x){ return x + 1; } int f(int x,int y){ int z = x * y + x; int r = g(x); return r + z; } int main(){ return f(3,4); }"
     [ "mv t3, a0"; "mul t4, t3, t4"; "call __mytoyc_g" ];
@@ -575,6 +591,10 @@ int main() {
       ".text\n  sw t0, 0(s0)\n  lw t1, 0(s0)\n  lw t2, 4(s0)\n  sw t2, 4(s0)\n"
     <> ".text\n  sw t0, 0(s0)\n  mv t1, t0\n  lw t2, 4(s0)\n"
   then failwith "riscv peephole mismatch";
+  if
+    Mytoyc.Riscv.peephole_asm ".text\n  mv t3, a0\n  mv a0, t3\n"
+    <> ".text\n  mv t3, a0\n"
+  then failwith "riscv move peephole mismatch";
   expect_opt_compile_contains
     "int main(){ int x = 5; return x * 8; }"
     [ "li a0, 40"; "ret" ];
@@ -584,12 +604,27 @@ int main() {
   expect_opt_compile_lacks
     "int f(int x){ if (x) return x * 8; return 0; } int main(){ return f(5); }"
     [ "  mul " ];
+  expect_opt_compile_contains
+    "int f(int n){ int i = 0; int s = 0; while (i < n) { s = s + i * 3; i = i + 1; } return s; } int main(){ return f(100); }"
+    [ "slli"; "add" ];
+  expect_opt_compile_lacks
+    "int f(int n){ int i = 0; int s = 0; while (i < n) { s = s + i * 3; i = i + 1; } return s; } int main(){ return f(100); }"
+    [ "  mul " ];
+  expect_opt_compile_lacks
+    "int f(int x){ if (x) return x * 10; return 0; } int main(){ return f(5); }"
+    [ "  mul " ];
   expect_opt_compile_lacks
     "int main(){ if (1) return 3; else return 4; }"
     [ "li a0, 4"; "beqz" ];
   expect_opt_compile_lacks
     "int main(){ int x = 0; while (0) { x = x + 1; } return x; }"
     [ ".L_main_while_cond_"; "beqz" ];
+  expect_opt_compile_lacks
+    "int main(){ int i = 0; while (i < 1000) { int x = i * i; i = i + 1; } return 7; }"
+    [ ".L_main_while_cond_"; "  mul " ];
+  expect_opt_run_result
+    "int g = 0; int main(){ int i = 0; while (i < 3) { g = g + 1; i = i + 1; } return g; }"
+    3;
   expect_opt_compile_count
     "int f(int x,int y){ int a = x + y; if (x) return a + (x + y); return a; } int main(){ return f(2,3); }"
     "  add " 2;
@@ -605,6 +640,12 @@ int main() {
   expect_opt_compile_lacks
     "int f(int x){ return x + 1; } int g(int y){ return f(y) * 2; } int main(){ return g(3); }"
     [ "call __mytoyc_f"; "call __mytoyc_g"; "__mytoyc_f:"; "__mytoyc_g:" ];
+  expect_opt_compile_contains
+    "int h(int a,int b,int c){ int x=a+b; int y=b+c; int z=x*y; int w=z+a; return w-c; } int main(){ return h(1,2,3); }"
+    [ "li a0, 13"; "ret" ];
+  expect_opt_compile_lacks
+    "int h(int a,int b,int c){ int x=a+b; int y=b+c; int z=x*y; int w=z+a; return w-c; } int main(){ return h(1,2,3); }"
+    [ "call __mytoyc_h"; "__mytoyc_h:" ];
   expect_opt_compile_lacks
     "int unused(){ return 9; } int main(){ return 1; }"
     [ "__mytoyc_unused" ];
@@ -619,7 +660,7 @@ int main() {
     15;
   expect_opt_compile_contains
     "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
-    [ "add a7, a5, a7\n.L_f_while_cond_" ];
+    [ "add a6, a1, a2\n.L_f_while_cond_" ];
   expect_opt_run_result
     "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
     27;
