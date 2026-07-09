@@ -163,6 +163,8 @@ let simplified_binary dest op lhs rhs =
           move_or_nop dest operand
       | Ast.Mul, operand, Ir.Imm (-1) | Ast.Mul, Ir.Imm (-1), operand ->
           unary_instr dest Ast.Neg operand
+      | Ast.Add, lhs, rhs when same_operand lhs rhs ->
+          [ Ir.ShiftLeft (dest, lhs, 1) ]
       | Ast.Mul, operand, Ir.Imm value
         when is_power_of_two value && log2 value < 32 ->
           [ Ir.ShiftLeft (dest, operand, log2 value) ]
@@ -388,6 +390,42 @@ let eliminate_dead_defs body =
     if List.length filtered = List.length body then body else fix filtered
   in
   fix body
+
+let resets_dead_store_block = function
+  | Ir.Label _ | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ | Ir.Call _ -> true
+  | _ -> false
+
+let eliminate_dead_stores body =
+  let optimize_block block =
+    let _, kept =
+      block
+      |> List.rev
+      |> List.fold_left
+        (fun (overwritten, kept) instr ->
+          match instr with
+          | Ir.StoreGlobal (name, _) ->
+              if StringSet.mem name overwritten then (overwritten, kept)
+              else (StringSet.add name overwritten, instr :: kept)
+          | Ir.LoadGlobal (_, name) ->
+              (StringSet.remove name overwritten, instr :: kept)
+          | _ -> (overwritten, instr :: kept))
+        (StringSet.empty, [])
+    in
+    kept
+  in
+  let flush acc_rev block_rev boundary =
+    let optimized = block_rev |> List.rev |> optimize_block in
+    match boundary with
+    | None -> List.rev (List.rev_append optimized acc_rev)
+    | Some instr -> instr :: List.rev_append optimized acc_rev
+  in
+  let rec loop acc_rev block_rev = function
+    | [] -> flush acc_rev block_rev None
+    | instr :: rest when resets_dead_store_block instr ->
+        loop (flush acc_rev block_rev (Some instr)) [] rest
+    | instr :: rest -> loop acc_rev (instr :: block_rev) rest
+  in
+  loop [] [] body
 
 type lattice =
   | LUnknown
@@ -723,6 +761,14 @@ let pure_hoistable_instr = function
   | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ ->
       false
 
+let loop_blocks_global_loads cfg nodes =
+  IntSet.exists
+    (fun node ->
+      match cfg.Cfg.instrs.(node) with
+      | Ir.StoreGlobal _ | Ir.Call _ -> true
+      | _ -> false)
+    nodes
+
 let instr_operands = function
   | Ir.Move (_, operand) | Ir.Unary (_, _, operand)
   | Ir.ShiftLeft (_, operand, _) ->
@@ -765,6 +811,7 @@ let licm_once body =
   let try_loop (header, latch) =
     let nodes = natural_loop cfg header latch in
     let defs = loop_defs cfg nodes in
+    let can_hoist_global_loads = not (loop_blocks_global_loads cfg nodes) in
     let invariant_defs = ref IntSet.empty in
     let hoisted = ref [] in
     let hoisted_indices = ref IntSet.empty in
@@ -776,7 +823,11 @@ let licm_once body =
           let instr = cfg.Cfg.instrs.(index) in
           match instr_dest instr with
           | Some dest
-            when pure_hoistable_instr instr
+            when (pure_hoistable_instr instr
+                 ||
+                 match instr with
+                 | Ir.LoadGlobal _ -> can_hoist_global_loads
+                 | _ -> false)
                  && single_definition def_counts dest
                  && List.for_all (operand_invariant defs !invariant_defs)
                       (instr_operands instr) ->
@@ -830,6 +881,7 @@ let optimize_body body =
       |> global_cse
       |> licm
       |> eliminate_dead_defs
+      |> eliminate_dead_stores
       |> cleanup_control_flow
     in
     if next = body then body else fix next

@@ -425,6 +425,19 @@ int main() {
     Mytoyc.Ir.
       ( [ LoadParam (0, 0); LoadParam (1, 1); Binary (2, Add, Reg 0, Reg 1);
           Return (Reg 2) ] );
+  expect_optimized_body
+    Mytoyc.Ir.( [ LoadParam (0, 0); Binary (1, Add, Reg 0, Reg 0); Return (Reg 1) ] )
+    Mytoyc.Ir.( [ LoadParam (0, 0); ShiftLeft (1, Reg 0, 1); Return (Reg 1) ] );
+  expect_optimized_body
+    Mytoyc.Ir.
+      ( [ Move (0, Imm 1); StoreGlobal ("g", Reg 0); Move (1, Imm 2);
+          StoreGlobal ("g", Reg 1); Return (Imm 0) ] )
+    Mytoyc.Ir.( [ StoreGlobal ("g", Imm 2); Return (Imm 0) ] );
+  if
+    Mytoyc.Riscv.peephole_asm
+      ".text\n  sw t0, 0(s0)\n  lw t1, 0(s0)\n  lw t2, 4(s0)\n  sw t2, 4(s0)\n"
+    <> ".text\n  sw t0, 0(s0)\n  mv t1, t0\n  lw t2, 4(s0)\n"
+  then failwith "riscv peephole mismatch";
   expect_opt_compile_contains
     "int main(){ int x = 5; return x * 8; }"
     [ "li a0, 40"; "ret" ];

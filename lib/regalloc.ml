@@ -49,6 +49,22 @@ let add_edge graph lhs rhs =
     |> IntMap.add lhs lhs_neighbors
     |> IntMap.add rhs rhs_neighbors
 
+let add_preference lhs rhs preferences =
+  if lhs = rhs then preferences
+  else
+    let add_one key value preferences =
+      let values = IntMap.find_opt key preferences |> Option.value ~default:[] in
+      IntMap.add key (value :: values) preferences
+    in
+    preferences |> add_one lhs rhs |> add_one rhs lhs
+
+let move_preferences body =
+  List.fold_left
+    (fun preferences -> function
+      | Ir.Move (dest, Ir.Reg source) -> add_preference dest source preferences
+      | _ -> preferences)
+    IntMap.empty body
+
 let all_vregs (cfg : Cfg.t) =
   Array.fold_left
     (fun regs set -> IntSet.union regs set)
@@ -75,7 +91,7 @@ let build_graph func =
   let graph = !graph in
   (cfg, liveness, graph)
 
-let choose_location regs used_phys spill_slot neighbors allocation =
+let choose_location regs preferences used_phys spill_slot reg neighbors allocation =
   let unavailable =
     IntSet.fold
       (fun neighbor used ->
@@ -84,13 +100,28 @@ let choose_location regs used_phys spill_slot neighbors allocation =
         | _ -> used)
       neighbors StringSet.empty
   in
-  match List.find_opt (fun reg -> not (StringSet.mem reg unavailable)) regs with
+  let preferred =
+    IntMap.find_opt reg preferences
+    |> Option.value ~default:[]
+    |> List.find_map (fun preferred ->
+           match IntMap.find_opt preferred allocation with
+           | Some (Phys phys)
+             when List.mem phys regs && not (StringSet.mem phys unavailable) ->
+               Some phys
+           | _ -> None)
+  in
+  match
+    match preferred with
+    | Some phys -> Some phys
+    | None -> List.find_opt (fun reg -> not (StringSet.mem reg unavailable)) regs
+  with
   | Some reg -> (Phys reg, StringSet.add reg used_phys, spill_slot)
   | None -> (Stack spill_slot, used_phys, spill_slot + 1)
 
 let allocate func =
   let regs = allocatable_regs func in
   let _, _, graph = build_graph func in
+  let preferences = move_preferences func.Ir.body in
   let nodes =
     graph
     |> IntMap.bindings
@@ -101,7 +132,7 @@ let allocate func =
     List.fold_left
       (fun (allocation, used_phys, spill_slot) (reg, neighbors) ->
         let location, used_phys, spill_slot =
-          choose_location regs used_phys spill_slot neighbors allocation
+          choose_location regs preferences used_phys spill_slot reg neighbors allocation
         in
         (IntMap.add reg location allocation, used_phys, spill_slot))
       (IntMap.empty, StringSet.empty, 0) nodes

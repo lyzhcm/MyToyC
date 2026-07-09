@@ -52,6 +52,60 @@ let emit_store allocation source reg =
   | Regalloc.Stack slot ->
       emit_store_word source "s0" (slot_offset slot)
 
+let starts_with prefix text =
+  let prefix_len = String.length prefix in
+  String.length text >= prefix_len && String.sub text 0 prefix_len = prefix
+
+let split_once text ch =
+  match String.index_opt text ch with
+  | None -> (text, "")
+  | Some index ->
+      ( String.sub text 0 index,
+        String.sub text (index + 1) (String.length text - index - 1) )
+
+let strip_trailing_newline text =
+  let len = String.length text in
+  if len > 0 && text.[len - 1] = '\n' then String.sub text 0 (len - 1)
+  else text
+
+let parse_memory_instr opcode line =
+  let prefix = "  " ^ opcode ^ " " in
+  if not (starts_with prefix line) then None
+  else
+    let rest =
+      String.sub line (String.length prefix)
+        (String.length line - String.length prefix)
+    in
+    let reg, mem = split_once rest ',' in
+    let reg = String.trim reg in
+    let mem = String.trim mem in
+    if reg = "" || mem = "" then None else Some (reg, mem)
+
+let peephole_lines lines =
+  let rec loop acc = function
+    | line :: next :: rest -> (
+        match (parse_memory_instr "sw" line, parse_memory_instr "lw" next) with
+        | Some (source, store_mem), Some (target, load_mem)
+          when store_mem = load_mem ->
+            let replacement =
+              if source = target then []
+              else [ emit_move target source |> strip_trailing_newline ]
+            in
+            loop (List.rev_append replacement (line :: acc)) rest
+        | _ -> (
+            match (parse_memory_instr "lw" line, parse_memory_instr "sw" next) with
+            | Some (target, load_mem), Some (source, store_mem)
+              when target = source && load_mem = store_mem ->
+                loop (line :: acc) rest
+            | _ -> loop (line :: acc) (next :: rest)))
+    | line :: rest -> loop (line :: acc) rest
+    | [] -> List.rev acc
+  in
+  loop [] lines
+
+let peephole_asm asm =
+  asm |> String.split_on_char '\n' |> peephole_lines |> String.concat "\n"
+
 let emit_operand_to_a0 allocation operand = emit_load allocation "a0" operand
 
 let result_target allocation dest fallback =
@@ -359,6 +413,7 @@ let emit_func func =
   in
   Printf.sprintf ".globl %s\n%s:\n%s%s" (asm_symbol func.Ir.name) (asm_symbol func.name) prologue
     (emit_instrs allocation use_frame func.body)
+  |> peephole_asm
 
 let emit_program (program : Ir.program) =
   let data_section =
