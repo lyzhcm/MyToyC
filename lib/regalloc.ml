@@ -49,18 +49,6 @@ let add_edge graph lhs rhs =
     |> IntMap.add lhs lhs_neighbors
     |> IntMap.add rhs rhs_neighbors
 
-let add_clique graph regs =
-  let regs = IntSet.elements regs in
-  let rec outer graph = function
-    | [] -> graph
-    | reg :: rest ->
-        let graph =
-          List.fold_left (fun graph other -> add_edge graph reg other) graph rest
-        in
-        outer graph rest
-  in
-  outer graph regs
-
 let all_vregs (cfg : Cfg.t) =
   Array.fold_left
     (fun regs set -> IntSet.union regs set)
@@ -75,16 +63,6 @@ let build_graph func =
   let liveness = Liveness.analyze cfg in
   let graph =
     IntSet.fold (fun reg graph -> add_node graph reg) (all_vregs cfg) IntMap.empty
-  in
-  let graph =
-    Array.fold_left
-      (fun graph live_set -> add_clique graph live_set)
-      graph liveness.live_in
-  in
-  let graph =
-    Array.fold_left
-      (fun graph live_set -> add_clique graph live_set)
-      graph liveness.live_out
   in
   let graph = ref graph in
   for index = 0 to Array.length cfg.defs - 1 do
