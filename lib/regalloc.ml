@@ -12,8 +12,20 @@ type allocation = {
   used_regs : string list;
 }
 
-let allocatable_regs =
+let callee_saved_regs =
   [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11" ]
+
+let leaf_extra_regs = [ "t3"; "t4"; "t5" ]
+
+let has_call body =
+  List.exists
+    (function
+      | Ir.Call _ -> true
+      | _ -> false)
+    body
+
+let allocatable_regs func =
+  if has_call func.Ir.body then callee_saved_regs else leaf_extra_regs @ callee_saved_regs
 
 let location allocation vreg =
   match IntMap.find_opt vreg allocation.locations with
@@ -85,7 +97,7 @@ let build_graph func =
   let graph = !graph in
   (cfg, liveness, graph)
 
-let choose_location used_phys spill_slot neighbors allocation =
+let choose_location regs used_phys spill_slot neighbors allocation =
   let unavailable =
     IntSet.fold
       (fun neighbor used ->
@@ -94,11 +106,12 @@ let choose_location used_phys spill_slot neighbors allocation =
         | _ -> used)
       neighbors StringSet.empty
   in
-  match List.find_opt (fun reg -> not (StringSet.mem reg unavailable)) allocatable_regs with
+  match List.find_opt (fun reg -> not (StringSet.mem reg unavailable)) regs with
   | Some reg -> (Phys reg, StringSet.add reg used_phys, spill_slot)
   | None -> (Stack spill_slot, used_phys, spill_slot + 1)
 
 let allocate func =
+  let regs = allocatable_regs func in
   let _, _, graph = build_graph func in
   let nodes =
     graph
@@ -110,13 +123,13 @@ let allocate func =
     List.fold_left
       (fun (allocation, used_phys, spill_slot) (reg, neighbors) ->
         let location, used_phys, spill_slot =
-          choose_location used_phys spill_slot neighbors allocation
+          choose_location regs used_phys spill_slot neighbors allocation
         in
         (IntMap.add reg location allocation, used_phys, spill_slot))
       (IntMap.empty, StringSet.empty, 0) nodes
   in
   let used_regs =
-    allocatable_regs
+    callee_saved_regs
     |> List.filter (fun reg -> StringSet.mem reg used_phys)
   in
   { locations; stack_slots; used_regs }

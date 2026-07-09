@@ -228,25 +228,60 @@ let emit_call allocation dest name args =
   setup_stack ^ setup_args ^ Printf.sprintf "  call %s\n" (asm_symbol name) ^ cleanup_stack
   ^ save_result
 
-let emit_return allocation operand =
-  let restore_regs =
-    allocation.used_regs
-    |> List.mapi (fun index reg ->
-           emit_load_word reg "s0" (saved_reg_offset allocation index))
-    |> String.concat ""
-  in
-  emit_operand_to_a0 allocation operand
-  ^ restore_regs
-  ^ emit_load_word "ra" "s0" (ra_offset allocation)
-  ^ emit_load_word "s0" "s0" (s0_offset allocation)
-  ^ emit_addi "sp" "sp" (frame_size allocation)
-  ^ "  ret\n"
+let emit_return allocation use_frame operand =
+  if not use_frame then emit_operand_to_a0 allocation operand ^ "  ret\n"
+  else
+    let restore_regs =
+      allocation.used_regs
+      |> List.mapi (fun index reg ->
+             emit_load_word reg "s0" (saved_reg_offset allocation index))
+      |> String.concat ""
+    in
+    emit_operand_to_a0 allocation operand
+    ^ restore_regs
+    ^ emit_load_word "ra" "s0" (ra_offset allocation)
+    ^ emit_load_word "s0" "s0" (s0_offset allocation)
+    ^ emit_addi "sp" "sp" (frame_size allocation)
+    ^ "  ret\n"
 
 let emit_move_instr allocation dest operand =
   match Regalloc.location allocation dest with
   | Regalloc.Phys phys -> emit_load allocation phys operand
   | Regalloc.Stack _ -> emit_load allocation "t0" operand ^ emit_store allocation "t0" dest
-let emit_instr allocation = function
+
+let operand_uses_reg reg = function
+  | Ir.Imm _ -> false
+  | Ir.Reg source -> source = reg
+
+let instr_uses_reg reg = function
+  | Ir.Move (_, operand) | Ir.Unary (_, _, operand)
+  | Ir.ShiftLeft (_, operand, _) | Ir.StoreGlobal (_, operand)
+  | Ir.BranchZero (operand, _) | Ir.Return operand ->
+      operand_uses_reg reg operand
+  | Ir.Binary (_, _, lhs, rhs) ->
+      operand_uses_reg reg lhs || operand_uses_reg reg rhs
+  | Ir.Call (_, _, args) -> List.exists (operand_uses_reg reg) args
+  | Ir.LoadParam _ | Ir.LoadGlobal _ | Ir.Label _ | Ir.Jump _ -> false
+
+let rec reg_used_later reg = function
+  | [] -> false
+  | instr :: rest -> instr_uses_reg reg instr || reg_used_later reg rest
+
+let emit_branch_compare allocation op lhs rhs label =
+  let lhs_load, lhs_reg = operand_reg allocation "t0" lhs in
+  let rhs_load, rhs_reg = operand_reg allocation "t1" rhs in
+  let branch =
+    match op with
+    | Ast.Lt -> Printf.sprintf "  bge %s, %s, %s\n" lhs_reg rhs_reg label
+    | Ast.Gt -> Printf.sprintf "  bge %s, %s, %s\n" rhs_reg lhs_reg label
+    | Ast.Le -> Printf.sprintf "  blt %s, %s, %s\n" rhs_reg lhs_reg label
+    | Ast.Ge -> Printf.sprintf "  blt %s, %s, %s\n" lhs_reg rhs_reg label
+    | Ast.Eq -> Printf.sprintf "  bne %s, %s, %s\n" lhs_reg rhs_reg label
+    | Ast.Ne -> Printf.sprintf "  beq %s, %s, %s\n" lhs_reg rhs_reg label
+    | _ -> ""
+  in
+  lhs_load ^ rhs_load ^ branch
+let emit_instr allocation use_frame = function
   | Ir.LoadParam (dest, index) -> emit_load_param allocation dest index
   | Ir.Move (dest, operand) -> emit_move_instr allocation dest operand
   | Ir.Unary (dest, op, operand) -> emit_unop allocation dest op operand
@@ -261,30 +296,67 @@ let emit_instr allocation = function
       let operand_load, operand_reg = operand_reg allocation "t0" operand in
       operand_load ^ Printf.sprintf "  beqz %s, %s\n" operand_reg label
   | Ir.Jump label -> Printf.sprintf "  j %s\n" label
-  | Ir.Return operand -> emit_return allocation operand
+  | Ir.Return operand -> emit_return allocation use_frame operand
+
+let emit_instrs allocation use_frame body =
+  let rec loop acc = function
+    | Ir.Binary (dest, op, lhs, rhs) :: Ir.BranchZero (Ir.Reg reg, label) :: rest
+      when dest = reg
+           && not (reg_used_later reg rest)
+           && (match op with
+              | Ast.Lt | Ast.Gt | Ast.Le | Ast.Ge | Ast.Eq | Ast.Ne -> true
+              | _ -> false) ->
+        loop (emit_branch_compare allocation op lhs rhs label :: acc) rest
+    | instr :: rest -> loop (emit_instr allocation use_frame instr :: acc) rest
+    | [] -> String.concat "" (List.rev acc)
+  in
+  loop [] body
 
 let emit_global global =
   Printf.sprintf ".globl %s\n%s:\n  .word %d\n" (asm_symbol global.Ir.name) (asm_symbol global.name)
     global.init
 
+let max_param_index body =
+  List.fold_left
+    (fun current -> function
+      | Ir.LoadParam (_, index) -> max current index
+      | _ -> current)
+    (-1) body
+
+let has_call body =
+  List.exists
+    (function
+      | Ir.Call _ -> true
+      | _ -> false)
+    body
+
+let can_omit_frame func allocation =
+  allocation.Regalloc.stack_slots = 0
+  && allocation.used_regs = []
+  && max_param_index func.Ir.body < 8
+  && not (has_call func.Ir.body)
+
 let emit_func func =
   let allocation = Regalloc.allocate func in
-  let frame_size = frame_size allocation in
-  let save_regs =
-    allocation.used_regs
-    |> List.mapi (fun index reg ->
-           emit_store_word reg "sp" (saved_reg_offset allocation index))
-    |> String.concat ""
-  in
+  let use_frame = not (can_omit_frame func allocation) in
   let prologue =
-    emit_addi "sp" "sp" (-frame_size)
-    ^ emit_store_word "ra" "sp" (ra_offset allocation)
-    ^ emit_store_word "s0" "sp" (s0_offset allocation)
-    ^ save_regs
-    ^ "  mv s0, sp\n"
+    if not use_frame then ""
+    else
+      let frame_size = frame_size allocation in
+      let save_regs =
+        allocation.used_regs
+        |> List.mapi (fun index reg ->
+               emit_store_word reg "sp" (saved_reg_offset allocation index))
+        |> String.concat ""
+      in
+      emit_addi "sp" "sp" (-frame_size)
+      ^ emit_store_word "ra" "sp" (ra_offset allocation)
+      ^ emit_store_word "s0" "sp" (s0_offset allocation)
+      ^ save_regs
+      ^ "  mv s0, sp\n"
   in
   Printf.sprintf ".globl %s\n%s:\n%s%s" (asm_symbol func.Ir.name) (asm_symbol func.name) prologue
-    (func.body |> List.map (emit_instr allocation) |> String.concat "")
+    (emit_instrs allocation use_frame func.body)
 
 let emit_program (program : Ir.program) =
   let data_section =

@@ -24,6 +24,10 @@ type instr =
   | Call of string
   | Ret
   | Beqz of string * string
+  | Beq of string * string * string
+  | Bne of string * string * string
+  | Blt of string * string * string
+  | Bge of string * string * string
   | Jump of string
 
 type program = {
@@ -94,6 +98,10 @@ let parse_instruction line =
   | "call", [ label ] -> Call label
   | "ret", [] -> Ret
   | "beqz", [ rs; label ] -> Beqz (rs, label)
+  | "beq", [ rs1; rs2; label ] -> Beq (rs1, rs2, label)
+  | "bne", [ rs1; rs2; label ] -> Bne (rs1, rs2, label)
+  | "blt", [ rs1; rs2; label ] -> Blt (rs1, rs2, label)
+  | "bge", [ rs1; rs2; label ] -> Bge (rs1, rs2, label)
   | "j", [ label ] -> Jump label
   | _ -> failwith ("unsupported instruction: " ^ line)
 
@@ -277,6 +285,18 @@ let run ?(max_steps = 1000000) assembly =
         else jump target
     | Beqz (rs, label) ->
         if get_reg regs rs = 0L then jump (label_pc program label) else advance ()
+    | Beq (rs1, rs2, label) ->
+        if get_reg regs rs1 = get_reg regs rs2 then jump (label_pc program label)
+        else advance ()
+    | Bne (rs1, rs2, label) ->
+        if get_reg regs rs1 <> get_reg regs rs2 then jump (label_pc program label)
+        else advance ()
+    | Blt (rs1, rs2, label) ->
+        if get_reg regs rs1 < get_reg regs rs2 then jump (label_pc program label)
+        else advance ()
+    | Bge (rs1, rs2, label) ->
+        if get_reg regs rs1 >= get_reg regs rs2 then jump (label_pc program label)
+        else advance ()
     | Jump label -> jump (label_pc program label)
   done;
   Int64.to_int state.result

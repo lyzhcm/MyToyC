@@ -271,13 +271,13 @@ int main() {
     "undefined variable: g";
 
   expect_compile_exact "int main(){ return 42; }"
-    ".text\n.globl main\nmain:\n  addi sp, sp, -16\n  sw ra, 12(sp)\n  sw s0, 8(sp)\n  mv s0, sp\n  li a0, 42\n  lw ra, 12(s0)\n  lw s0, 8(s0)\n  addi sp, sp, 16\n  ret\n";
+    ".text\n.globl main\nmain:\n  li a0, 42\n  ret\n";
   expect_compile_contains "int main(){ return 1 + 2 * 3; }"
     [ ".globl main"; "mul"; "add"; "ret" ];
   expect_compile_contains "int main(){ return -(1 + 2); }"
     [ ".globl main"; "add"; "neg"; "ret" ];
   expect_compile_contains "int main(){ return 1 < 2 && 3 != 4; }"
-    [ ".globl main"; "slt"; "snez"; "beqz"; "ret" ];
+    [ ".globl main"; "bge"; "beq"; "ret" ];
   expect_compile_contains
     "int main(){ int a = 1; int b = 2; a = a + b; return a; }"
     [ ".globl main"; "li "; "add"; "ret" ];
@@ -286,8 +286,8 @@ int main() {
     [ ".L_main_if_else_"; ".L_main_if_end_"; "beqz"; "j .L_main_if_end_" ];
   expect_compile_contains
     "int main(){ int x = 0; while (x < 3) { x = x + 1; if (x == 2) continue; if (x > 2) break; } return x; }"
-    [ ".L_main_while_cond_"; ".L_main_while_end_"; "beqz";
-      "j .L_main_while_cond_" ];
+    [ ".L_main_while_cond_"; ".L_main_while_end_"; "bge";
+      "bne"; "j .L_main_while_cond_" ];
   expect_compile_contains "int main(){ return 1 && 0 || 2; }"
     [ ".L_main_land_false_"; ".L_main_lor_rhs_"; "beqz";
       "j .L_main_lor_end_" ];
@@ -405,7 +405,7 @@ int main() {
     [ "__mytoyc_unused" ];
   expect_opt_compile_contains
     "int f(int x){ if (x < 10) return x + 5; return x - 3; } int main(){ return f(1); }"
-    [ "slti"; "ret" ];
+    [ "bge"; "ret" ];
   expect_compile_error "int main(){ return a; }" "undefined variable: a";
   expect_compile_error "int main(){ int a = 0; int a = 1; return a; }"
     "duplicate variable: a";
