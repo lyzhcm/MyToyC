@@ -15,7 +15,9 @@ type allocation = {
 let callee_saved_regs =
   [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11" ]
 
-let leaf_extra_regs = [ "t3"; "t4"; "t5" ]
+let arg_regs = [ "a0"; "a1"; "a2"; "a3"; "a4"; "a5"; "a6"; "a7" ]
+
+let leaf_temp_regs = [ "t3"; "t4"; "t5" ]
 
 let has_call body =
   List.exists
@@ -24,8 +26,26 @@ let has_call body =
       | _ -> false)
     body
 
+let max_param_index body =
+  List.fold_left
+    (fun current -> function
+      | Ir.LoadParam (_, index) -> max current index
+      | _ -> current)
+    (-1) body
+
+let leaf_extra_regs func =
+  let param_count = max_param_index func.Ir.body + 1 in
+  let safe_arg_regs =
+    arg_regs
+    |> List.mapi (fun index reg -> (index, reg))
+    |> List.filter_map (fun (index, reg) ->
+           if index >= param_count then Some reg else None)
+  in
+  safe_arg_regs @ leaf_temp_regs
+
 let allocatable_regs func =
-  if has_call func.Ir.body then callee_saved_regs else leaf_extra_regs @ callee_saved_regs
+  if has_call func.Ir.body then leaf_temp_regs @ callee_saved_regs
+  else leaf_extra_regs func @ callee_saved_regs
 
 let location allocation vreg =
   match IntMap.find_opt vreg allocation.locations with
@@ -168,7 +188,22 @@ let reg_weights (cfg : Cfg.t) =
     (0, IntMap.empty) cfg.instrs
   |> snd
 
-let choose_location regs preferences used_phys spill_slot reg neighbors allocation =
+let call_live_regs cfg liveness =
+  Array.fold_left
+    (fun (index, regs) instr ->
+      match instr with
+      | Ir.Call _ -> (index + 1, IntSet.union regs liveness.Liveness.live_out.(index))
+      | _ -> (index + 1, regs))
+    (0, IntSet.empty) cfg.Cfg.instrs
+  |> snd
+
+let caller_saved_candidate phys vreg call_live =
+  List.mem phys leaf_temp_regs && not (IntSet.mem vreg call_live)
+
+let choose_location regs preferences call_live used_phys spill_slot reg neighbors allocation =
+  let usable phys =
+    (not (List.mem phys leaf_temp_regs)) || caller_saved_candidate phys reg call_live
+  in
   let unavailable =
     IntSet.fold
       (fun neighbor used ->
@@ -183,24 +218,30 @@ let choose_location regs preferences used_phys spill_slot reg neighbors allocati
     |> List.find_map (fun preferred ->
            match IntMap.find_opt preferred allocation with
            | Some (Phys phys)
-             when List.mem phys regs && not (StringSet.mem phys unavailable) ->
+             when List.mem phys regs
+                  && usable phys
+                  && not (StringSet.mem phys unavailable) ->
                Some phys
            | _ -> None)
   in
   match
     match preferred with
     | Some phys -> Some phys
-    | None -> List.find_opt (fun reg -> not (StringSet.mem reg unavailable)) regs
+    | None ->
+        List.find_opt
+          (fun phys -> usable phys && not (StringSet.mem phys unavailable))
+          regs
   with
   | Some reg -> (Phys reg, StringSet.add reg used_phys, spill_slot)
   | None -> (Stack spill_slot, used_phys, spill_slot + 1)
 
 let allocate func =
   let regs = allocatable_regs func in
-  let cfg, _, graph = build_graph func in
+  let cfg, liveness, graph = build_graph func in
   let preferences = move_preferences func.Ir.body in
   let weights = reg_weights cfg in
   let weight reg = IntMap.find_opt reg weights |> Option.value ~default:0 in
+  let call_live = call_live_regs cfg liveness in
   let nodes =
     graph
     |> IntMap.bindings
@@ -215,7 +256,8 @@ let allocate func =
     List.fold_left
       (fun (allocation, used_phys, spill_slot) (reg, neighbors) ->
         let location, used_phys, spill_slot =
-          choose_location regs preferences used_phys spill_slot reg neighbors allocation
+          choose_location regs preferences call_live used_phys spill_slot reg neighbors
+            allocation
         in
         (IntMap.add reg location allocation, used_phys, spill_slot))
       (IntMap.empty, StringSet.empty, 0) nodes

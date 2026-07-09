@@ -341,6 +341,9 @@ int main() {
   expect_compile_contains
     "int id(int x){ return x; } int main(){ return id(1); }"
     [ ".globl __mytoyc_id"; "call __mytoyc_id"; "ret" ];
+  expect_compile_contains
+    "int g(int x){ return x + 1; } int f(int x,int y){ int z = x * y + x; int r = g(x); return r + z; } int main(){ return f(3,4); }"
+    [ "mv t3, a0"; "mul t4, t3, t4"; "call __mytoyc_g" ];
   expect_run_result
     "int ret = 5; int add(int a0, int t0){ return a0 + t0 + ret; } int main(){ int a0 = 1; return add(a0, 2); }"
     8;
@@ -616,7 +619,7 @@ int main() {
     15;
   expect_opt_compile_contains
     "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
-    [ "add s2, t5, s2\n.L_f_while_cond_" ];
+    [ "add a7, a5, a7\n.L_f_while_cond_" ];
   expect_opt_run_result
     "int f(int n,int a,int b){ int i = 0; int s = 0; while (i < n) { int x = a + b; s = s + x; i = i + 1; } return s; } int main(){ return f(3,4,5); }"
     27;
