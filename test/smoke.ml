@@ -163,6 +163,25 @@ let many_args_source count =
   in
   Printf.sprintf "int pick(%s){ return p%d; } int main(){ return pick(%s); }"
     params (count - 1) args
+
+let many_args_sum_source count =
+  let params =
+    List.init count (fun index -> Printf.sprintf "int p%d" index)
+    |> String.concat ","
+  in
+  let sum =
+    List.init count (fun index -> Printf.sprintf "p%d" index)
+    |> String.concat " + "
+  in
+  let args =
+    List.init count string_of_int |> String.concat ","
+  in
+  Printf.sprintf "int sum(%s){ return %s; } int main(){ return sum(%s); }"
+    params sum args
+
+let arithmetic_series_sum count =
+  (count * (count - 1)) / 2
+
 let expect_compile_error source expected =
   try
     ignore (Mytoyc.Driver.compile source);
@@ -357,6 +376,8 @@ int main() {
     [ ".L_main_if_else_"; ".L_main_if_end_"; "ret" ];
   expect_real_riscv_immediates (many_locals_source 530);
   expect_real_riscv_immediates (many_args_source 520);
+  expect_run_result (many_args_source 520) 519;
+  expect_run_result (many_args_sum_source 120) (arithmetic_series_sum 120);
   expect_run_result
     "int sum(int n, int acc){ if (n == 0) return acc; return sum(n - 1, acc + n); } int main(){ return sum(10, 0); }"
     55;

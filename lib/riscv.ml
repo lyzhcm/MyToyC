@@ -300,6 +300,8 @@ let emit_instr allocation use_frame = function
 
 let emit_instrs allocation use_frame body =
   let rec loop acc = function
+    | Ir.LoadParam (dest, _) :: rest when not (reg_used_later dest rest) ->
+        loop acc rest
     | Ir.Binary (dest, op, lhs, rhs) :: Ir.BranchZero (Ir.Reg reg, label) :: rest
       when dest = reg
            && not (reg_used_later reg rest)
