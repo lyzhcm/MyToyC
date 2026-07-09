@@ -329,6 +329,16 @@ int main() {
     [ ".L_main_if_else_"; ".L_main_if_end_"; "ret" ];
   expect_real_riscv_immediates (many_locals_source 530);
   expect_real_riscv_immediates (many_args_source 520);
+  expect_opt_compile_contains "int main(){ int x = 7; return x * 1 + 0; }"
+    [ "li a0, 7"; "ret" ];
+  expect_opt_compile_lacks "int main(){ int x = 7; return x * 1 + 0; }"
+    [ "  mul "; "  add " ];
+  expect_opt_compile_contains "int main(){ int x = 7; return (x - x) + (x == x); }"
+    [ "li a0, 1"; "ret" ];
+  expect_opt_compile_contains "const int g = 5; int main(){ return g + 1; }"
+    [ "li a0, 6"; "ret" ];
+  expect_opt_compile_lacks "const int g = 5; int main(){ return g + 1; }"
+    [ "la t0, __mytoyc_g" ];
   expect_opt_compile_contains "int main(){ return 1 + 2 * 3; }"
     [ "li a0, 7"; "ret" ];
   expect_opt_compile_lacks "int main(){ return 1 + 2 * 3; }"

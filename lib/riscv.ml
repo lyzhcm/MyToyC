@@ -58,6 +58,14 @@ let result_target allocation dest fallback =
   | Regalloc.Phys phys -> phys
   | Regalloc.Stack _ -> fallback
 
+let operand_reg allocation fallback = function
+  | Ir.Imm value -> (Printf.sprintf "  li %s, %d\n" fallback value, fallback)
+  | Ir.Reg reg -> (
+      match Regalloc.location allocation reg with
+      | Regalloc.Phys phys -> ("", phys)
+      | Regalloc.Stack slot ->
+          (emit_load_word fallback "s0" (slot_offset slot), fallback))
+
 let emit_binop allocation dest op lhs rhs =
   let lhs_tmp = "t0" in
   let rhs_tmp = "t1" in
@@ -98,51 +106,58 @@ let emit_binop allocation dest op lhs rhs =
       emit_single operand (fun target source ->
           Printf.sprintf "  slti %s, %s, %d\n  xori %s, %s, 1\n" target
             source (imm + 1) target target)
+  | Ast.LAnd, _, _ | Ast.LOr, _, _ ->
+      let load = emit_load allocation lhs_tmp lhs ^ emit_load allocation rhs_tmp rhs in
+      let instr =
+        match op with
+        | Ast.LAnd ->
+            Printf.sprintf
+              "  snez %s, %s\n  snez %s, %s\n  and %s, %s, %s\n" lhs_tmp
+              lhs_tmp rhs_tmp rhs_tmp dest_tmp lhs_tmp rhs_tmp
+        | Ast.LOr ->
+            Printf.sprintf "  or %s, %s, %s\n  snez %s, %s\n" dest_tmp lhs_tmp
+              rhs_tmp dest_tmp dest_tmp
+        | _ -> ""
+      in
+      load ^ instr ^ emit_store allocation dest_tmp dest
   | _ ->
-  let load = emit_load allocation lhs_tmp lhs ^ emit_load allocation rhs_tmp rhs in
-  let instr =
-    match op with
-    | Ast.Add -> Printf.sprintf "  add %s, %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-    | Ast.Sub -> Printf.sprintf "  sub %s, %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-    | Ast.Mul -> Printf.sprintf "  mul %s, %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-    | Ast.Div -> Printf.sprintf "  div %s, %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-    | Ast.Mod -> Printf.sprintf "  rem %s, %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-    | Ast.Lt -> Printf.sprintf "  slt %s, %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-    | Ast.Gt -> Printf.sprintf "  slt %s, %s, %s\n" dest_tmp rhs_tmp lhs_tmp
-    | Ast.Le ->
-        Printf.sprintf "  slt %s, %s, %s\n  xori %s, %s, 1\n" dest_tmp rhs_tmp
-          lhs_tmp dest_tmp dest_tmp
-    | Ast.Ge ->
-        Printf.sprintf "  slt %s, %s, %s\n  xori %s, %s, 1\n" dest_tmp lhs_tmp
-          rhs_tmp dest_tmp dest_tmp
-    | Ast.Eq ->
-        Printf.sprintf "  sub %s, %s, %s\n  seqz %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-          dest_tmp dest_tmp
-    | Ast.Ne ->
-        Printf.sprintf "  sub %s, %s, %s\n  snez %s, %s\n" dest_tmp lhs_tmp rhs_tmp
-          dest_tmp dest_tmp
-    | Ast.LAnd ->
-        Printf.sprintf
-          "  snez %s, %s\n  snez %s, %s\n  and %s, %s, %s\n" lhs_tmp lhs_tmp
-          rhs_tmp rhs_tmp dest_tmp lhs_tmp rhs_tmp
-    | Ast.LOr ->
-        Printf.sprintf
-          "  or %s, %s, %s\n  snez %s, %s\n" dest_tmp lhs_tmp rhs_tmp dest_tmp
-          dest_tmp
-  in
-  load ^ instr ^ emit_store allocation dest_tmp dest
+      let lhs_load, lhs_reg = operand_reg allocation lhs_tmp lhs in
+      let rhs_load, rhs_reg = operand_reg allocation rhs_tmp rhs in
+      let instr =
+        match op with
+        | Ast.Add -> Printf.sprintf "  add %s, %s, %s\n" dest_tmp lhs_reg rhs_reg
+        | Ast.Sub -> Printf.sprintf "  sub %s, %s, %s\n" dest_tmp lhs_reg rhs_reg
+        | Ast.Mul -> Printf.sprintf "  mul %s, %s, %s\n" dest_tmp lhs_reg rhs_reg
+        | Ast.Div -> Printf.sprintf "  div %s, %s, %s\n" dest_tmp lhs_reg rhs_reg
+        | Ast.Mod -> Printf.sprintf "  rem %s, %s, %s\n" dest_tmp lhs_reg rhs_reg
+        | Ast.Lt -> Printf.sprintf "  slt %s, %s, %s\n" dest_tmp lhs_reg rhs_reg
+        | Ast.Gt -> Printf.sprintf "  slt %s, %s, %s\n" dest_tmp rhs_reg lhs_reg
+        | Ast.Le ->
+            Printf.sprintf "  slt %s, %s, %s\n  xori %s, %s, 1\n" dest_tmp rhs_reg
+              lhs_reg dest_tmp dest_tmp
+        | Ast.Ge ->
+            Printf.sprintf "  slt %s, %s, %s\n  xori %s, %s, 1\n" dest_tmp lhs_reg
+              rhs_reg dest_tmp dest_tmp
+        | Ast.Eq ->
+            Printf.sprintf "  sub %s, %s, %s\n  seqz %s, %s\n" dest_tmp lhs_reg rhs_reg
+              dest_tmp dest_tmp
+        | Ast.Ne ->
+            Printf.sprintf "  sub %s, %s, %s\n  snez %s, %s\n" dest_tmp lhs_reg rhs_reg
+              dest_tmp dest_tmp
+        | Ast.LAnd | Ast.LOr -> ""
+      in
+      lhs_load ^ rhs_load ^ instr ^ emit_store allocation dest_tmp dest
 
 let emit_unop allocation dest op operand =
-  let tmp = result_target allocation dest "t0" in
-  let load = emit_load allocation tmp operand in
+  let load, src = operand_reg allocation "t0" operand in
+  let tmp = result_target allocation dest "t1" in
   let instr =
     match op with
-      | Ast.Pos -> Printf.sprintf "  mv %s, %s\n" tmp tmp
-      | Ast.Neg -> Printf.sprintf "  neg %s, %s\n" tmp tmp
-      | Ast.LNot -> Printf.sprintf "  seqz %s, %s\n" tmp tmp
+    | Ast.Pos -> emit_move tmp src
+    | Ast.Neg -> Printf.sprintf "  neg %s, %s\n" tmp src
+    | Ast.LNot -> Printf.sprintf "  seqz %s, %s\n" tmp src
   in
   load ^ instr ^ emit_store allocation tmp dest
-
 let emit_shift_left allocation dest operand amount =
   let operand_tmp = "t0" in
   let dest_tmp = result_target allocation dest "t1" in

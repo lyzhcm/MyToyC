@@ -10,6 +10,7 @@ type func_sig = {
 type env = {
   locals : Ir.vreg Symbol.StringMap.t;
   globals : unit Symbol.StringMap.t;
+  global_consts : int Symbol.StringMap.t;
   funcs : func_sig Symbol.StringMap.t;
   next_reg : int;
   next_label : int;
@@ -26,6 +27,7 @@ let empty_env =
   {
     locals = Symbol.StringMap.empty;
     globals = Symbol.StringMap.empty;
+    global_consts = Symbol.StringMap.empty;
     funcs = Symbol.StringMap.empty;
     next_reg = 0;
     next_label = 0;
@@ -42,15 +44,19 @@ let fresh_label env prefix =
 
 type var_ref =
   | Local of Ir.vreg
+  | GlobalConst of int
   | Global of string
 
 let find_var env name =
   match Symbol.StringMap.find_opt name env.locals with
   | Some reg -> Local reg
   | None -> (
-      match Symbol.StringMap.find_opt name env.globals with
-      | Some () -> Global name
-      | None -> Diagnostic.fail (Printf.sprintf "undefined variable: %s" name))
+      match Symbol.StringMap.find_opt name env.global_consts with
+      | Some value -> GlobalConst value
+      | None -> (
+          match Symbol.StringMap.find_opt name env.globals with
+          | Some () -> Global name
+          | None -> Diagnostic.fail (Printf.sprintf "undefined variable: %s" name)))
 
 let add_var env name reg =
   { env with locals = Symbol.StringMap.add name reg env.locals }
@@ -89,6 +95,7 @@ let rec lower_expr env = function
 and lower_var env name =
   match find_var env name with
   | Local reg -> (env, [], Ir.Reg reg)
+  | GlobalConst value -> (env, [], Ir.Imm value)
   | Global name ->
       let dest, env = fresh env in
       (env, [ Ir.LoadGlobal (dest, name) ], Ir.Reg dest)
@@ -229,6 +236,7 @@ let rec lower_stmt env = function
       let store =
         match find_var env name with
         | Local dest -> [ Ir.Move (dest, value) ]
+        | GlobalConst _ -> Diagnostic.fail (Printf.sprintf "cannot assign to const: %s" name)
         | Global global_name -> [ Ir.StoreGlobal (global_name, value) ]
       in
       (env, code @ store)
@@ -449,6 +457,29 @@ let rec eval_static_expr consts = function
       | _ -> None)
   | Ast.Call _ -> None
 
+let build_global_consts (program : Ast.program) =
+  let consts, _ =
+    List.fold_left
+      (fun (consts, stopped) item ->
+        if stopped then (consts, stopped)
+        else
+          match item with
+          | Ast.FuncDef _ -> (consts, stopped)
+          | Ast.GlobalDecl decls ->
+              List.fold_left
+                (fun (consts, stopped) decl ->
+                  if stopped then (consts, stopped)
+                  else
+                    match decl with
+                    | Ast.ConstDecl (name, expr) -> (
+                        match eval_static_expr consts expr with
+                        | Some value -> (Symbol.StringMap.add name value consts, false)
+                        | None -> (consts, true))
+                    | Ast.VarDecl _ -> (consts, stopped))
+                (consts, stopped) decls)
+      (Symbol.StringMap.empty, false) program
+  in
+  consts
 let collect_global_initializers (program : Ast.program) =
   List.fold_left
     (fun (consts, globals, runtime_decls) item ->
@@ -490,8 +521,9 @@ let lower_program (program : Ast.program) : Ir.program =
     else Symbol.StringMap.add global_init_guard_name () globals_env
   in
   let funcs_env = build_func_env program in
+  let global_consts = build_global_consts program in
   let base_env =
-    { empty_env with globals = globals_env; funcs = funcs_env }
+    { empty_env with globals = globals_env; global_consts; funcs = funcs_env }
   in
   let funcs =
     program
