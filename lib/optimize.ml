@@ -864,6 +864,180 @@ let licm body =
   in
   fix body
 
+let instr_def = function
+  | Ir.LoadParam (dest, _) | Ir.Move (dest, _) | Ir.Unary (dest, _, _)
+  | Ir.Binary (dest, _, _, _) | Ir.ShiftLeft (dest, _, _)
+  | Ir.LoadGlobal (dest, _) ->
+      Some dest
+  | Ir.Call (dest, _, _) -> dest
+  | Ir.StoreGlobal _ | Ir.Label _ | Ir.BranchZero _ | Ir.Jump _ | Ir.Return _ ->
+      None
+
+let add_def_count reg counts =
+  let count = IntMap.find_opt reg counts |> Option.value ~default:0 in
+  IntMap.add reg (count + 1) counts
+
+let loop_def_counts cfg nodes =
+  IntSet.fold
+    (fun node counts ->
+      match instr_def cfg.Cfg.instrs.(node) with
+      | Some reg -> add_def_count reg counts
+      | None -> counts)
+    nodes IntMap.empty
+
+let loop_def_count counts reg =
+  IntMap.find_opt reg counts |> Option.value ~default:0
+
+let iv_update_at cfg nodes index =
+  if index + 1 >= Array.length cfg.Cfg.instrs || not (IntSet.mem (index + 1) nodes)
+  then None
+  else
+    match (cfg.Cfg.instrs.(index), cfg.Cfg.instrs.(index + 1)) with
+    | Ir.Binary (tmp, Ast.Add, Ir.Reg iv, Ir.Imm step), Ir.Move (dest, Ir.Reg source)
+      when source = tmp && dest = iv ->
+        Some (iv, step)
+    | Ir.Binary (tmp, Ast.Add, Ir.Imm step, Ir.Reg iv), Ir.Move (dest, Ir.Reg source)
+      when source = tmp && dest = iv ->
+        Some (iv, step)
+    | Ir.Binary (tmp, Ast.Sub, Ir.Reg iv, Ir.Imm step), Ir.Move (dest, Ir.Reg source)
+      when source = tmp && dest = iv && step <> Int32.to_int Int32.min_int ->
+        Some (iv, -step)
+    | _ -> None
+
+let loop_iv_updates cfg nodes =
+  IntSet.fold
+    (fun node updates ->
+      match iv_update_at cfg nodes node with
+      | Some (iv, step) -> (node, iv, step) :: updates
+      | None -> updates)
+    nodes []
+
+let loop_mul_by_iv cfg nodes update_index iv =
+  let add_mul scale node dest uses =
+    let current = IntMap.find_opt scale uses |> Option.value ~default:[] in
+    IntMap.add scale ((node, dest) :: current) uses
+  in
+  IntSet.fold
+    (fun node uses ->
+      if node >= update_index then uses
+      else
+        match cfg.Cfg.instrs.(node) with
+        | Ir.Binary (dest, Ast.Mul, Ir.Reg reg, Ir.Imm scale)
+          when reg = iv && scale <> 0 && scale <> 1 ->
+            add_mul scale node dest uses
+        | Ir.Binary (dest, Ast.Mul, Ir.Imm scale, Ir.Reg reg)
+          when reg = iv && scale <> 0 && scale <> 1 ->
+            add_mul scale node dest uses
+        | Ir.ShiftLeft (dest, Ir.Reg reg, amount)
+          when reg = iv && amount > 0 && amount < 31 ->
+            add_mul (1 lsl amount) node dest uses
+        | _ -> uses)
+    nodes IntMap.empty
+
+let replace_at index replacement replacements =
+  IntMap.add index replacement replacements
+
+let prepend_at index instrs inserts =
+  let current = IntMap.find_opt index inserts |> Option.value ~default:[] in
+  IntMap.add index (current @ instrs) inserts
+
+let max_reg_operand_for_iv current = function
+  | Ir.Imm _ -> current
+  | Ir.Reg reg -> max current reg
+
+let max_reg_instr_for_iv current = function
+  | Ir.LoadParam (dest, _) | Ir.LoadGlobal (dest, _) -> max current dest
+  | Ir.Move (dest, operand) | Ir.Unary (dest, _, operand)
+  | Ir.ShiftLeft (dest, operand, _) ->
+      max current dest |> fun current -> max_reg_operand_for_iv current operand
+  | Ir.Binary (dest, _, lhs, rhs) ->
+      max current dest
+      |> fun current -> max_reg_operand_for_iv current lhs
+      |> fun current -> max_reg_operand_for_iv current rhs
+  | Ir.StoreGlobal (_, operand) | Ir.BranchZero (operand, _)
+  | Ir.Return operand ->
+      max_reg_operand_for_iv current operand
+  | Ir.Call (dest, _, args) ->
+      let current =
+        match dest with
+        | None -> current
+        | Some reg -> max current reg
+      in
+      List.fold_left max_reg_operand_for_iv current args
+  | Ir.Label _ | Ir.Jump _ -> current
+
+let max_reg_body_for_iv body =
+  List.fold_left max_reg_instr_for_iv (-1) body
+
+let strength_reduce_iv_once body =
+  let cfg = Cfg.of_instrs body in
+  let count = Array.length cfg.Cfg.instrs in
+  let doms = dominators cfg in
+  let backedges =
+    List.init count (fun index ->
+        cfg.Cfg.succs.(index)
+        |> List.filter_map (fun succ ->
+               if dominates doms succ index then Some (succ, index) else None))
+    |> List.concat
+  in
+  let next_reg = ref (max_reg_body_for_iv body + 1) in
+  let fresh () =
+    let reg = !next_reg in
+    incr next_reg;
+    reg
+  in
+  let try_loop (header, latch) =
+    let nodes = natural_loop cfg header latch in
+    let def_counts = loop_def_counts cfg nodes in
+    let updates =
+      loop_iv_updates cfg nodes
+      |> List.filter (fun (_, iv, step) ->
+             step <> 0 && loop_def_count def_counts iv = 1)
+    in
+    let rec choose = function
+      | [] -> None
+      | (update_index, iv, step) :: rest -> (
+          let muls = loop_mul_by_iv cfg nodes update_index iv in
+          match IntMap.choose_opt muls with
+          | None -> choose rest
+          | Some (scale, _uses) ->
+              let derived = fresh () in
+              let delta = Int32.(to_int (mul (of_int step) (of_int scale))) in
+              if delta = 0 then choose rest
+              else Some (header, update_index, iv, scale, derived, delta, muls))
+    in
+    choose updates
+  in
+  match List.find_map try_loop backedges with
+  | None -> body
+  | Some (header, update_index, iv, scale, derived, delta, muls) ->
+      let init = [ Ir.Binary (derived, Ast.Mul, Ir.Reg iv, Ir.Imm scale) ] in
+      let bump = [ Ir.Binary (derived, Ast.Add, Ir.Reg derived, Ir.Imm delta) ] in
+      let inserts = IntMap.empty |> prepend_at header init |> prepend_at update_index bump in
+      let replacements =
+        match IntMap.find_opt scale muls with
+        | Some uses ->
+            List.fold_left
+              (fun replacements (node, dest) ->
+                replace_at node (Ir.Move (dest, Ir.Reg derived)) replacements)
+              IntMap.empty uses
+        | None -> IntMap.empty
+      in
+      cfg.Cfg.instrs
+      |> Array.to_list
+      |> List.mapi (fun index instr -> (index, instr))
+      |> List.concat_map (fun (index, instr) ->
+             let before = IntMap.find_opt index inserts |> Option.value ~default:[] in
+             let instr = IntMap.find_opt index replacements |> Option.value ~default:instr in
+             before @ [ instr ])
+
+let strength_reduce_iv body =
+  let rec fix body =
+    let next = strength_reduce_iv_once body in
+    if next = body then body else fix next
+  in
+  fix body
+
 let loop_has_side_effect cfg nodes =
   IntSet.exists
     (fun node ->
@@ -939,6 +1113,7 @@ let optimize_body body =
       |> cleanup_control_flow
       |> global_cse
       |> licm
+      |> strength_reduce_iv
       |> eliminate_dead_loops
       |> eliminate_dead_defs
       |> eliminate_dead_stores

@@ -606,10 +606,19 @@ int main() {
     [ "  mul " ];
   expect_opt_compile_contains
     "int f(int n){ int i = 0; int s = 0; while (i < n) { s = s + i * 3; i = i + 1; } return s; } int main(){ return f(100); }"
-    [ "slli"; "add" ];
+    [ "addi a3, a3, 3"; "add a2, a2, a3" ];
   expect_opt_compile_lacks
     "int f(int n){ int i = 0; int s = 0; while (i < n) { s = s + i * 3; i = i + 1; } return s; } int main(){ return f(100); }"
     [ "  mul " ];
+  expect_opt_run_result
+    "int f(int n){ int i=0; int s=0; while(i<n){ s = s + i * 3 + i * 5; i = i + 1; } return s; } int main(){ return f(5); }"
+    80;
+  expect_opt_compile_lacks
+    "int f(int n){ int i=0; int s=0; while(i<n){ s = s + i * 3 + i * 3; i = i + 1; } return s; } int main(){ return f(5); }"
+    [ "  mul " ];
+  expect_opt_compile_lacks
+    "int f(int n){ int i=0; int s=0; while(i<n){ s = s + i * 8; i = i + 1; } return s; } int main(){ return f(5); }"
+    [ "slli" ];
   expect_opt_compile_lacks
     "int f(int x){ if (x) return x * 10; return 0; } int main(){ return f(5); }"
     [ "  mul " ];
