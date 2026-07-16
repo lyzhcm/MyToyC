@@ -436,6 +436,15 @@ int main() {
   expect_opt_compile_contains
     "int main(){ int x = 3; int y = x; return y + 4; }"
     [ "li a0, 7"; "ret" ];
+  expect_opt_compile_contains
+    "int g=0; int set(){ g=1; return 3; } int main(){ return set()+g; }"
+    [ "sw "; "lw "; "ret" ];
+  expect_opt_compile_lacks
+    "int g=0; int set(){ g=1; return 3; } int main(){ return set()+g; }"
+    [ "main:\n  li a0, 4\n  ret" ];
+  expect_opt_run_result
+    "int g=0; int set(){ g=1; return 3; } int main(){ return set()+g; }"
+    4;
   expect_optimized_body
     Mytoyc.Ir.( [ LoadParam (0, 0); Move (1, Reg 0); Return (Reg 1) ] )
     Mytoyc.Ir.( [ LoadParam (0, 0); Return (Reg 0) ] );
